@@ -1,5 +1,19 @@
 #include "llama-graph.h"
 
+#ifdef TOSH_ENABLE_DYNAMIC_MOE
+#include "tosh-moe.h"
+static inline ggml_tensor * tosh_moe_bank_of(ggml_tensor * t) {
+    return t ? (ggml_tensor *) tosh_moe_bank_ptr(t) : t;
+}
+#else
+static inline const void * tosh_moe_state_of(const void *) { return nullptr; }
+static inline const void * tosh_moe_ram_of(const void *)   { return nullptr; }
+static inline int tosh_moe_experts_of(const void *)         { return 0; }
+static inline int tosh_moe_fixed_of(const void *)           { return 0; }
+static inline int tosh_moe_ids_room(int) { return 0; }
+static inline ggml_tensor * tosh_moe_bank_of(ggml_tensor * t) { return t; }
+#endif
+
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-batch.h"
@@ -1489,6 +1503,8 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     loras            (params.loras),
     mctx             (params.mctx),
     cross            (params.cross),
+    hadamard_rotations(params.hadamard_rotations),
+    hadamard_inverses (params.hadamard_inverses),
     samplers         (params.samplers),
     cb_func          (params.cb),
     res              (params.res),
@@ -1511,11 +1527,72 @@ ggml_tensor * llm_graph_context::build_cvec(
     return cvec->apply_to(ctx0, cur, il);
 }
 
+ggml_tensor * llm_graph_context::build_hadamard_input(
+          ggml_tensor * w,
+          ggml_tensor * cur,
+          const llama_hadamard_rotations * rotations) const {
+    if (!rotations) {
+        rotations = hadamard_rotations;
+    }
+    if (!rotations) {
+        return cur;
+    }
+    const auto it = rotations->find(w);
+    if (it == rotations->end()) {
+        return cur;
+    }
+    const auto & t = it->second;
+
+    const auto key = std::make_pair((const ggml_tensor *) cur, (const ggml_tensor *) t.rot);
+    const auto memo = hadamard_memo.find(key);
+    if (memo != hadamard_memo.end()) {
+        return memo->second;
+    }
+
+    ggml_tensor * x = cur;
+    if (t.perm_rep > 1) {
+        x = ggml_is_contiguous(x) ? x : ggml_cont(ctx0, x);
+        const int64_t ne1 = x->ne[1], ne2 = x->ne[2], ne3 = x->ne[3];
+        x = ggml_reshape_4d(ctx0, x, t.perm_hd, t.perm_nk, t.perm_rep, ne1*ne2*ne3);
+        x = ggml_cont(ctx0, ggml_permute(ctx0, x, 0, 2, 1, 3));
+        x = ggml_reshape_4d(ctx0, x, t.perm_hd*t.perm_nk*t.perm_rep, ne1, ne2, ne3);
+    }
+    if (t.signs) {
+        x = ggml_mul(ctx0, x, t.signs);
+    }
+    x = llama_mul_mat_hadamard(ctx0, x, t.rot);
+
+    hadamard_memo[key] = x;
+    return x;
+}
+
+ggml_tensor * llm_graph_context::build_hadamard_lookup(
+          ggml_tensor * table,
+          ggml_tensor * rows,
+          const llama_hadamard_rotations * inverses) const {
+    if (!inverses) {
+        inverses = hadamard_inverses;
+    }
+    if (!inverses) {
+        return rows;
+    }
+    const auto it = inverses->find(table);
+    if (it == inverses->end()) {
+        return rows;
+    }
+    // latent rows back to the primal basis: h = s * (H z)
+    rows = llama_mul_mat_hadamard(ctx0, rows, it->second.rot);
+    if (it->second.signs) {
+        rows = ggml_mul(ctx0, rows, it->second.signs);
+    }
+    return rows;
+}
+
 ggml_tensor * llm_graph_context::build_lora_mm(
           ggml_tensor * w,
           ggml_tensor * cur,
           ggml_tensor * w_s) const {
-    ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
+    ggml_tensor * res = ggml_mul_mat(ctx0, w, build_hadamard_input(w, cur));
 
     if (w_s) {
         res = ggml_mul(ctx0, res, w_s);
@@ -1547,7 +1624,7 @@ ggml_tensor * llm_graph_context::build_lora_mm_id(
           ggml_tensor * cur, // ggml_tensor * b
           ggml_tensor * ids,
           ggml_tensor * w_s) const {
-    ggml_tensor * res = ggml_mul_mat_id(ctx0, w, cur, ids);
+    ggml_tensor * res = ggml_mul_mat_id(ctx0, w, build_hadamard_input(w, cur), ids);
 
     if (w_s) {
         const int64_t n_expert = w_s->ne[0];
@@ -2123,6 +2200,40 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     ggml_tensor * weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
     cb(weights, "ffn_moe_weights", il);
 
+    // Every expert the batch routes to has to get a slot: the pick leaves the ones over the
+    // bank marked -1 and nothing downstream can run them. A bank of every expert always fits.
+    ggml_tensor * moe_first = gate_up_exps ? gate_up_exps : gate_exps;
+    bool moe_cached = tosh_moe_state_of(moe_first) != nullptr;
+    if (moe_cached) {
+        // the backend writes the remapped routing into a fixed slice of the cache state, so a
+        // batch whose ids do not fit there stays on the plain path
+        ggml_tensor * bank = (ggml_tensor *) tosh_moe_ram_of(moe_first);
+        const int64_t need = (selected_experts->ne[1] - 1)*(int64_t) (selected_experts->nb[1]/sizeof(int32_t))
+            + selected_experts->ne[0];
+        const int n_bank_experts = tosh_moe_experts_of(moe_first);
+        moe_cached = bank && n_bank_experts > 0 && need <= tosh_moe_ids_room(n_bank_experts);
+    }
+    if (moe_cached) {
+        ggml_tensor * bank = (ggml_tensor *) tosh_moe_ram_of(moe_first);
+        const int n_bank_experts = tosh_moe_experts_of(moe_first);
+        const bool whole_bank = bank && n_bank_experts > 0 && moe_first->ne[2] >= n_bank_experts;
+        const bool split_wide = tosh_moe_fixed_of(moe_first) > 0 &&
+            getenv("TOSH_MOE_BOUNDED_STAGE") != nullptr;
+        // A split bank can only admit experts into the ring, so that is the bound, not the
+        // slot count: past it the pick leaves ids at -1 and the batch reads outside the bank.
+        const int n_fixed = tosh_moe_fixed_of(moe_first);
+        const int64_t room = n_fixed > 0 ? moe_first->ne[2] - n_fixed : moe_first->ne[2];
+        moe_cached = whole_bank || split_wide || n_tokens*n_expert_used <= room;
+    }
+
+    ggml_tensor * expert_ids = selected_experts;
+    if (!moe_cached) {
+        gate_up_exps = tosh_moe_bank_of(gate_up_exps);
+        gate_exps    = tosh_moe_bank_of(gate_exps);
+        up_exps      = tosh_moe_bank_of(up_exps);
+        down_exps    = tosh_moe_bank_of(down_exps);
+    }
+
 
     if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
         weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
@@ -2168,7 +2279,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     if (gate_up_exps) {
         // merged gate_up path: one mul_mat_id, then split into gate and up views
-        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, selected_experts, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
+        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, expert_ids, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
         cb(gate_up, "ffn_moe_gate_up", il);
 
         if (up_exps_s) {
@@ -2187,7 +2298,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(up, "ffn_moe_up", il);
     } else {
         // separate gate and up path
-        up = build_lora_mm_id(up_exps, cur, selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
+        up = build_lora_mm_id(up_exps, cur, expert_ids, up_exps_s); // [n_ff, n_expert_used, n_tokens]
         cb(up, "ffn_moe_up", il);
 
         if (up_exps_s) {
@@ -2200,7 +2311,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         if (gate_exps) {
-            cur = build_lora_mm_id(gate_exps, cur, selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
+            cur = build_lora_mm_id(gate_exps, cur, expert_ids, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
             cb(cur, "ffn_moe_gate", il);
         } else {
             cur = up;
@@ -2301,7 +2412,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             GGML_ABORT("fatal error");
     }
 
-    experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
+    experts = build_lora_mm_id(down_exps, cur, expert_ids, down_exps_s); // [n_embd, n_expert_used, n_tokens]
     cb(experts, "ffn_moe_down", il);
 
     if (down_exps_s) {
@@ -2381,6 +2492,7 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd) const {
         auto & cur = inps[0];
 
         cur = ggml_get_rows(ctx0, tok_embd, inp->tokens);
+        cur = build_hadamard_lookup(tok_embd, cur);
 
         // apply lora for embedding tokens if needed
         for (const auto & lora : *loras) {
@@ -2599,6 +2711,18 @@ ggml_tensor * llm_graph_context::build_attn_mha(
              int64_t   n_kv_max,
                float   kq_scale,
                  int   il) const {
+    // TurboQuant pre-rotate-queries: WHT-rotate Q so <Q_rot, K_rot> preserves scores.
+    // K is stored WHT-rotated by the turbo quantizer; the orthogonal rotation cancels.
+    static const bool diag_no_wht = getenv("TOSH_DIAG_NO_WHT") != nullptr;
+    if (q->ne[0] < k->ne[0]) {
+        q = ggml_pad(ctx0, q, k->ne[0] - q->ne[0], 0, 0, 0);
+    }
+    GGML_ASSERT(q->ne[0] == k->ne[0]);
+    if (!diag_no_wht && (k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0)) {
+        if (!ggml_is_contiguous(q)) { q = ggml_cont(ctx0, q); }
+        q = ggml_turbo_wht(ctx0, q, 0, 0, nullptr);
+    }
+
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
@@ -2612,7 +2736,53 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     ggml_tensor * cur;
 
-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
+    // AMD FA wins decode, while the decomposed graph wins long prefill for the
+    // measured head sizes.
+    const char * metal_simd_width = getenv("TOSH_METAL_SIMD_WIDTH");
+    const bool measured_head_size =
+        q->ne[0] == 64 || q->ne[0] == 128 || q->ne[0] == 256 || q->ne[0] == 512;
+    // Head 64/128 beat the decomposed route at every depth on both wave widths; bias
+    // and softcap have no blocked kernel and would land on the slow generic path.
+    const bool amd_prefill_fa_blocked =
+        (q->ne[0] == 64 || q->ne[0] == 128) &&
+        metal_simd_width != nullptr &&
+        (strcmp(metal_simd_width, "32") == 0 || strcmp(metal_simd_width, "64") == 0) &&
+        hparams.f_max_alibi_bias == 0.0f && !hparams.attn_soft_cap &&
+        getenv("TOSH_FA_PF_DISABLE") == nullptr;
+    // Head-256 is neutral through 1024 tokens and only pulls ahead on longer
+    // prompts; keep FA for pp512, where it measured slightly faster.
+    const int64_t decomposed_min_tokens = q->ne[0] == 256 ? 512 : 32;
+    // Quantized caches ride the same route: K stays quantized as mul_mat's left
+    // operand and quantized V is dequantized once before its transpose. Covers
+    // every pair the app offers (f16/q8_0/q4_0). Escape hatch for just these.
+    const bool decomposed_k_ok =
+        k->type == GGML_TYPE_F16 || k->type == GGML_TYPE_Q8_0 || k->type == GGML_TYPE_Q4_0;
+    const bool decomposed_v_ok =
+        v->type == GGML_TYPE_F16 || v->type == GGML_TYPE_Q8_0 || v->type == GGML_TYPE_Q4_0;
+    const bool decomposed_kv_ok =
+        (k->type == GGML_TYPE_F16 && v->type == GGML_TYPE_F16) ||
+        (getenv("TOSH_QK_PREFILL_DISABLE") == nullptr && decomposed_k_ok && decomposed_v_ok);
+    // the dequantization of a quantized V below only exists on the device, so layers a
+    // partial offload leaves in host memory keep flash attention
+    const ggml_tensor * v_alloc = v;
+    while (v_alloc != nullptr && v_alloc->buffer == nullptr) {
+        v_alloc = v_alloc->view_src;
+    }
+    const bool decomposed_v_on_device =
+        !ggml_is_quantized(v->type) ||
+        (v_alloc != nullptr && !ggml_backend_buft_is_host(ggml_backend_buffer_get_type(v_alloc->buffer)));
+    const bool amd_prefill_decomposed =
+        getenv("TOSH_FA_AMD") != nullptr &&
+        decomposed_v_on_device &&
+        getenv("TOSH_FA_AMD_PREFILL_DECOMPOSED_DISABLE") == nullptr &&
+        getenv("TOSH_FA_AMD_HEAD64_PREFILL_DISABLE") == nullptr &&
+        metal_simd_width != nullptr &&
+        // wave64 validated on GCN/Vega (parity + long-prompt wins); hatch opts out
+        (strcmp(metal_simd_width, "32") == 0 ||
+         (strcmp(metal_simd_width, "64") == 0 && getenv("TOSH_W64_PREFILL_DISABLE") == nullptr)) &&
+        n_tokens > decomposed_min_tokens && measured_head_size &&
+        decomposed_kv_ok && !amd_prefill_fa_blocked;
+    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr && !amd_prefill_decomposed;
     if (use_flash_attn) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
@@ -2638,6 +2808,20 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
 
+        // TurboQuant: inverse WHT on FA output when V values are WHT-rotated.
+        if (!diag_no_wht && (v->type == GGML_TYPE_TURBO2_0 || v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0)) {
+            if (cur->ne[0] % 128 == 0) {
+                if (!ggml_is_contiguous(cur)) { cur = ggml_cont(ctx0, cur); }
+                cur = ggml_turbo_wht(ctx0, cur, 1, 128, nullptr);
+            }
+        }
+
+        const int64_t orig_head_v = hparams.n_embd_head_v(il);
+        if (orig_head_v != cur->ne[0]) {
+            cur = ggml_view_4d(ctx0, cur, orig_head_v, cur->ne[1], cur->ne[2], cur->ne[3], cur->nb[1], cur->nb[2], cur->nb[3], 0);
+            cur = ggml_cont(ctx0, cur);
+        }
+
         if (v_mla) {
 #if 0
             // v_mla can be applied as a matrix-vector multiplication with broadcasting across dimension 3 == n_tokens.
@@ -2657,6 +2841,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
     } else {
+        // sinks models (gpt-oss) lose with the quantized-K mul_mat here while
+        // winning on the f16 one; dequantize K once instead of falling back to FA
+        if (sinks && ggml_is_quantized(k->type)) {
+            k = ggml_cast(ctx0, k, GGML_TYPE_F16);
+        }
         ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
         cb(kq, "kq", il);
 
@@ -2697,12 +2886,31 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         if (!v_trans) {
             // note: avoid this branch
+            // quantized V reaches this route via the RDNA prefill selector; the
+            // transposed mul_mat operand must be dequantized first
+            if (ggml_is_quantized(v->type)) {
+                v = ggml_cast(ctx0, v, GGML_TYPE_F16);
+            }
             v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
             cb(v, "v_cont", il);
         }
 
         ggml_tensor * kqv = ggml_mul_mat(ctx0, v, kq);
         cb(kqv, "kqv", il);
+
+        // TurboQuant: inverse WHT on attention output (non-FA path) when V is WHT-rotated.
+        if (v->type == GGML_TYPE_TURBO2_0 || v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0) {
+            if (kqv->ne[0] % 128 == 0) {
+                if (!ggml_is_contiguous(kqv)) { kqv = ggml_cont(ctx0, kqv); }
+                kqv = ggml_turbo_wht(ctx0, kqv, 1, 128, nullptr);
+            }
+        }
+
+        const int64_t orig_head_v = hparams.n_embd_head_v(il);
+        if (orig_head_v != kqv->ne[0]) {
+            kqv = ggml_view_4d(ctx0, kqv, orig_head_v, kqv->ne[1], kqv->ne[2], kqv->ne[3], kqv->nb[1], kqv->nb[2], kqv->nb[3], 0);
+            kqv = ggml_cont(ctx0, kqv);
+        }
 
         // for MLA with the absorption optimization, we need to "decompress" from MQA back to MHA
         if (v_mla) {
@@ -2911,6 +3119,74 @@ ggml_tensor * llm_graph_context::build_attn(
     return cur;
 }
 
+bool llm_graph_context::mtp_kv_only() const {
+    static const bool disabled = getenv("TOSH_MTP_KV_ONLY_DISABLE") != nullptr;
+
+    return !disabled && n_outputs == 0;
+}
+
+void llm_graph_context::build_attn_kv_store(
+        llm_graph_input_attn_kv * inp,
+        ggml_tensor * k_cur,
+        ggml_tensor * v_cur,
+                int   il) const {
+    if (inp->self_k_rot) {
+        k_cur = llama_mul_mat_hadamard(ctx0, k_cur, inp->self_k_rot);
+    }
+
+    if (inp->self_v_rot) {
+        v_cur = llama_mul_mat_hadamard(ctx0, v_cur, inp->self_v_rot);
+    }
+
+    ggml_build_forward_expand(gf, v_cur);
+    ggml_build_forward_expand(gf, k_cur);
+
+    const auto * mctx_cur = inp->mctx;
+
+    const auto & k_idxs = inp->get_k_idxs();
+    const auto & v_idxs = inp->get_v_idxs();
+
+    ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
+    ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il));
+}
+
+void llm_graph_context::build_attn_kv_store(
+        llm_graph_input_attn_kv_iswa * inp,
+        ggml_tensor * k_cur,
+        ggml_tensor * v_cur,
+                int   il) const {
+    const bool is_swa = hparams.is_swa(il);
+
+    auto * k_rot = is_swa ? inp->self_k_rot_swa : inp->self_k_rot;
+    auto * v_rot = is_swa ? inp->self_v_rot_swa : inp->self_v_rot;
+
+    if (k_rot && k_cur) {
+        k_cur = llama_mul_mat_hadamard(ctx0, k_cur, k_rot);
+    }
+
+    if (v_rot && v_cur) {
+        v_cur = llama_mul_mat_hadamard(ctx0, v_cur, v_rot);
+    }
+
+    const auto * mctx_cur = is_swa ? inp->mctx->get_swa() : inp->mctx->get_base();
+
+    if (k_cur) {
+        ggml_build_forward_expand(gf, k_cur);
+
+        const auto & k_idxs = is_swa ? inp->get_k_idxs_swa() : inp->get_k_idxs();
+
+        ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
+    }
+
+    if (v_cur) {
+        ggml_build_forward_expand(gf, v_cur);
+
+        const auto & v_idxs = is_swa ? inp->get_v_idxs_swa() : inp->get_v_idxs();
+
+        ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il));
+    }
+}
+
 static std::unique_ptr<llm_graph_input_attn_k> build_attn_inp_k_impl(
            ggml_context * ctx0,
      const llama_ubatch & ubatch,
@@ -2973,7 +3249,9 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * q = q_cur;
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
+    const bool turbo_k = k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0;
+    const int64_t v_head = turbo_k ? k->ne[0] : v_cur->ne[0];
+    ggml_tensor * v = ggml_view_4d(ctx0, k, v_head, k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
     cb(cur, "kqv_out", il);
@@ -3058,7 +3336,9 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * q = q_cur;
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
+    const bool turbo_k = k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0;
+    const int64_t v_head = turbo_k ? k->ne[0] : v_cur->ne[0];
+    ggml_tensor * v = ggml_view_4d(ctx0, k, v_head, k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask_top_k, sinks, v_mla, top_k->ne[0], kq_scale, il);
     cb(cur, "kqv_out", il);

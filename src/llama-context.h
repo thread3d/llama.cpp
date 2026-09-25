@@ -367,6 +367,23 @@ private:
     llm_graph_result_ptr gf_res_prev;
     llm_graph_result_ptr gf_res_reserve;
 
+    // the Hadamard transform coverage is checked once, on the first reserved graph
+    bool hadamard_verified = false;
+
+    // A second prepared {graph, scheduler} pair, so a session alternating between two shapes
+    // rebuilds neither. It borrows the first one's buffers, and is declared after `sched` so it
+    // is destroyed before them.
+    llm_graph_result_ptr   gf_res_alt;
+    ggml_backend_sched_ptr sched_alt;
+    ggml_backend_sched_t   sched_owner = nullptr; // the scheduler that owns the compute buffers
+    int                    shape_slot  = 0;
+    int                    shape_slots_filled = 0;
+
+    // Drop the second prepared shape and go back to a single scheduler.
+    void shape_cache_disable();
+    // Both prepared shapes are stale: rebuild them on next use.
+    void shape_cache_invalidate();
+
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;
 

@@ -36,6 +36,24 @@ struct llm_build_delta_net_base : public llm_graph_context {
 
     virtual ~llm_build_delta_net_base() = default;
 
+    // gate inputs before their activations, for the fused operator to apply itself; the
+    // other paths keep the activated g and b they are given
+    struct {
+        ggml_tensor * g  = nullptr;
+        ggml_tensor * b  = nullptr;
+        ggml_tensor * dt = nullptr;
+        ggml_tensor * a  = nullptr;
+    } gdn_raw;
+
+    ggml_tensor * build_gated_delta_net_op(
+                ggml_tensor * q,
+                ggml_tensor * k,
+                ggml_tensor * v,
+                ggml_tensor * g,
+                ggml_tensor * b,
+                ggml_tensor * s,
+                    int64_t   K);
+
     // returns pair of output and new state
     std::pair<ggml_tensor *, ggml_tensor *> build_delta_net_chunking(
                 ggml_tensor * q,
@@ -2355,7 +2373,11 @@ struct llama_model_qwen4exp : public llama_model_base {
 
     struct graph : public llm_build_delta_net_base {
         graph(const llama_model & model, const llm_graph_params & params);
-    private:
+    protected:
+        struct no_build_t {};
+        graph(const llama_model & model, const llm_graph_params & params, no_build_t) :
+            llm_build_delta_net_base(params), model(model) {}
+
         // HC replaces every layer norm: residual is [n_embd, hc, n_tokens]
         ggml_tensor * build_hc_mix(
                     ggml_tensor * x,
@@ -2445,6 +2467,10 @@ struct llama_model_qwen4exp : public llama_model_base {
                             int   il);
 
         const llama_model & model;
+    };
+
+    struct graph_mtp : public graph {
+        graph_mtp(const llama_model & model, const llm_graph_params & params);
     };
 
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;

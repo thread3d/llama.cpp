@@ -27,8 +27,19 @@
 #define N_R0_Q2_0 8
 #define N_SG_Q2_0 2
 
+#define N_R0_PQ2_0 8
+#define N_R0_PQ2_0_H 8
+#define N_R0_PQ2_0_NC 8
+#define N_SG_PQ2_0 2
+
+#define N_R0_PTQ1_0 4
+#define N_R0_PTQ1_0_NC 8
+#define N_R0_PTQ1_0_W64 8
+#define N_SG_PTQ1_0_W64 1
+#define N_SG_PTQ1_0 2
+
 #define N_R0_Q4_0 4
-#define N_SG_Q4_0 2
+#define N_SG_Q4_0 1
 
 #define N_R0_Q4_1 4
 #define N_SG_Q4_1 2
@@ -42,22 +53,22 @@
 #define N_R0_Q8_0 2
 #define N_SG_Q8_0 4
 
-#define N_R0_MXFP4 2
-#define N_SG_MXFP4 2
+#define N_R0_MXFP4 4
+#define N_SG_MXFP4 1
 
 #define N_R0_Q2_K 4
-#define N_SG_Q2_K 2
+#define N_SG_Q2_K 1
 
-#define N_R0_Q3_K 2
+#define N_R0_Q3_K 4
 #define N_SG_Q3_K 2
 
 #define N_R0_Q4_K 2
 #define N_SG_Q4_K 2
 
-#define N_R0_Q5_K 1
-#define N_SG_Q5_K 2
+#define N_R0_Q5_K 2
+#define N_SG_Q5_K 1
 
-#define N_R0_Q6_K 2
+#define N_R0_Q6_K 4
 #define N_SG_Q6_K 2
 
 #define N_R0_IQ1_S 4
@@ -107,6 +118,8 @@
 #define FC_SUM_ROWS                    1400
 #define FC_UPSCALE                     1500
 #define FC_GATED_DELTA_NET             1600
+#define FC_TURBO_WHT                   1700
+#define FC_FWHT                        1800
 
 // op-specific constants
 #define OP_FLASH_ATTN_EXT_NQPSG 8
@@ -459,7 +472,49 @@ typedef struct {
     int32_t  n_head_log2;
     float    logit_softcap;
     int32_t  n_kv_max_padded;
+    int32_t  has_sinks; // read by the AMD kernels; upstream uses a function constant
+    int32_t  has_mask;  // 0 for bidirectional attention (vision towers), which has no mask
 } ggml_metal_kargs_flash_attn_ext_vec;
+
+// the AMD kernels take their own copy: a field added to the upstream vec struct changes the
+// constant buffer layout and with it the code the Metal compiler emits for them
+typedef struct {
+    int32_t  ne01;
+    int32_t  ne02;
+    int32_t  ne03;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  ne11;
+    int32_t  ne_12_2; // assume K and V are same shape
+    int32_t  ne_12_3;
+    int32_t  ns10;
+    uint64_t nb11;
+    uint64_t nb12;
+    uint64_t nb13;
+    int32_t  ns20;
+    uint64_t nb21;
+    uint64_t nb22;
+    uint64_t nb23;
+    int32_t  ne31;
+    int32_t  ne32;
+    int32_t  ne33;
+    uint64_t nb31;
+    uint64_t nb32;
+    uint64_t nb33;
+    int32_t  ne1;
+    int32_t  ne2;
+    int32_t  ne3;
+    float    scale;
+    float    max_bias;
+    float    m0;
+    float    m1;
+    int32_t  n_head_log2;
+    float    logit_softcap;
+    int32_t  has_sinks; // read by the AMD kernels; upstream uses a function constant
+    int32_t  has_mask;  // 0 for bidirectional attention (vision towers), which has no mask
+    int32_t  n_kv_max_padded; // sparse: length of the per-row index list
+} ggml_metal_kargs_flash_attn_ext_amd;
 
 typedef struct {
     int32_t  ne30;
@@ -515,6 +570,17 @@ typedef struct {
     int16_t  r2;
     int16_t  r3;
 } ggml_metal_kargs_mul_mv;
+
+// Three independent decode projections sharing the same activation. The Metal
+// backend recognizes adjacent Q/V/K MUL_MAT nodes and launches them as one grid;
+// each segment retains its own strides because mixed GGUF quants are common.
+typedef struct {
+    ggml_metal_kargs_mul_mv q;
+    ggml_metal_kargs_mul_mv v;
+    ggml_metal_kargs_mul_mv k;
+    uint32_t                nwg_q;
+    uint32_t                nwg_v;
+} ggml_metal_kargs_mul_mv_qvk;
 
 typedef struct {
     int32_t  ne00;
@@ -589,6 +655,22 @@ typedef struct {
     uint64_t nb1;
     int32_t  nr0;
 } ggml_metal_kargs_mul_mv_id;
+
+typedef struct {
+    int32_t n_used;
+    int32_t n_tokens;
+    int32_t stride;
+    int32_t n_expert;
+    int32_t n_slots;
+    int32_t n_fixed;
+    int32_t max_fetch;
+} ggml_metal_kargs_moe_lru;
+
+typedef struct {
+    uint32_t row_u4;
+    int32_t  max_fetch;
+    int32_t  n_chunks;
+} ggml_metal_kargs_moe_fetch;
 
 // NORM
 // RMS_NORM
@@ -978,7 +1060,16 @@ typedef struct {
     uint64_t nb1;
     uint64_t nb2;
     uint64_t nb3;
+    uint64_t s_nb1;  // cache row stride when the state is read straight from the cache
+    uint64_t sd_nb1; // cache row stride when the new state is written straight into it
+    float    eps_q;  // l2 norm of q and k done in the kernel: x / sqrt(sum(x^2) + eps)
+    float    eps_k;
 } ggml_metal_kargs_gated_delta_net;
+
+typedef struct {
+    int64_t  n_elements;
+    int32_t  direction;
+} ggml_metal_kargs_turbo_wht;
 
 typedef struct {
     int32_t  ne00;
@@ -1214,8 +1305,37 @@ typedef struct {
 } ggml_metal_kargs_top_k;
 
 typedef struct {
+    int32_t n_expert;
+    int32_t n_expert_used;
+    int32_t nrows;
+    int32_t mode;            // 0 softmax, 1 sigmoid, 2 sqrt(softplus), 3 raw (delayed softmax)
+    int32_t with_norm;
+    int32_t delayed_softmax;
+    int32_t has_bias;
+    float   clamp;
+    float   scale;
+} ggml_metal_kargs_topk_moe;
+
+typedef struct {
     int32_t nrows;
 } ggml_metal_kargs_fwht;
+
+typedef struct {
+    int32_t nrows;  // rows of the output, one transform block each
+    int32_t nsign;  // width of the sign vector, 0 for none
+} ggml_metal_kargs_fwht_fused;
+
+typedef struct {
+    int32_t  ne00;   // row width, a whole number of 1024 blocks
+    float    eps;
+    uint64_t nb01;   // row strides of the input, the norm output and the transform output
+    uint64_t nb1n;
+    uint64_t nb1h;
+    int32_t  write_norm;
+    int32_t  add;    // the row is the sum of two inputs, written out as well
+    uint64_t nb11;
+    uint64_t nb1a;
+} ggml_metal_kargs_rms_norm_fwht;
 
 typedef struct {
     int64_t  ne0;

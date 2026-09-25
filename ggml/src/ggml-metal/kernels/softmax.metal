@@ -12,6 +12,7 @@ kernel void kernel_soft_max(
         uint3 tpitg[[thread_position_in_threadgroup]],
         uint  sgitg[[simdgroup_index_in_threadgroup]],
         uint  tiisg[[thread_index_in_simdgroup]],
+        uint sgptg[[threads_per_simdgroup]],
         uint3  tptg[[threads_per_threadgroup]]) {
     const int32_t i03 = tgpig.z;
     const int32_t i02 = tgpig.y;
@@ -47,7 +48,7 @@ kernel void kernel_soft_max(
 
     // find the max value in the block
     float max_val = simd_max(lmax);
-    if (tptg.x > N_SIMDWIDTH) {
+    if (tptg.x > sgptg) {
         if (sgitg == 0) {
             buf[tiisg] = -INFINITY;
         }
@@ -78,7 +79,7 @@ kernel void kernel_soft_max(
 
     float sum = simd_sum(lsum);
 
-    if (tptg.x > N_SIMDWIDTH) {
+    if (tptg.x > sgptg) {
         if (sgitg == 0) {
             buf[tiisg] = 0.0f;
         }
@@ -118,6 +119,7 @@ kernel void kernel_soft_max_4(
         uint3 tpitg[[thread_position_in_threadgroup]],
         uint  sgitg[[simdgroup_index_in_threadgroup]],
         uint  tiisg[[thread_index_in_simdgroup]],
+        uint sgptg[[threads_per_simdgroup]],
         uint3  tptg[[threads_per_threadgroup]]) {
     const int32_t i03 = tgpig.z;
     const int32_t i02 = tgpig.y;
@@ -153,7 +155,7 @@ kernel void kernel_soft_max_4(
     const float lmax = MAX(MAX(lmax4[0], lmax4[1]), MAX(lmax4[2], lmax4[3]));
 
     float max_val = simd_max(lmax);
-    if (tptg.x > N_SIMDWIDTH) {
+    if (tptg.x > sgptg) {
         if (sgitg == 0) {
             buf[tiisg] = -INFINITY;
         }
@@ -186,7 +188,7 @@ kernel void kernel_soft_max_4(
 
     float sum = simd_sum(lsum);
 
-    if (tptg.x > N_SIMDWIDTH) {
+    if (tptg.x > sgptg) {
         if (sgitg == 0) {
             buf[tiisg] = 0.0f;
         }
@@ -221,3 +223,196 @@ template [[host_name("kernel_soft_max_f16")]]   kernel kernel_soft_max_t   kerne
 template [[host_name("kernel_soft_max_f32")]]   kernel kernel_soft_max_t   kernel_soft_max<float>;
 template [[host_name("kernel_soft_max_f16_4")]] kernel kernel_soft_max_4_t kernel_soft_max_4<half4>;
 template [[host_name("kernel_soft_max_f32_4")]] kernel kernel_soft_max_4_t kernel_soft_max_4<float4>;
+
+kernel void kernel_topk_moe_f32(
+        constant ggml_metal_kargs_topk_moe & args,
+        device const char * src_logits,
+        device const char * src_bias,
+        device       char * dst_weights,
+        device       char * dst_ids,
+        threadgroup float * sf [[threadgroup(0)]],
+        threadgroup int   * si [[threadgroup(1)]],
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        uint  tiitg[[thread_index_in_threadgroup]],
+        uint3 ntgg [[threads_per_threadgroup]]) {
+    const uint ntg = ntgg.x;
+    const int row = tgpig.x;
+    if (row >= args.nrows) {
+        return;
+    }
+
+    const int ne = args.n_expert;
+    const int nu = args.n_expert_used;
+
+    device const float   * logits  = (device const float   *) src_logits  + (size_t) ne*row;
+    device const float   * bias    = (device const float   *) src_bias;
+    device       float   * weights = (device       float   *) dst_weights + (size_t) nu*row;
+    device       int32_t * ids     = (device       int32_t *) dst_ids     + (size_t) ne*row;
+
+    threadgroup float * wt  = sf;          // value that becomes the weight
+    threadgroup float * sel = sf + ne;     // value the top-k selects on (wt + bias)
+    threadgroup float * rv  = sf + 2*ne;   // reduction scratch, ntg entries
+
+    for (int i = tiitg; i < ne; i += ntg) {
+        wt[i] = logits[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (args.mode == 0) {
+        float lmax = -INFINITY;
+        for (int i = tiitg; i < ne; i += ntg) {
+            lmax = max(lmax, wt[i]);
+        }
+        rv[tiitg] = lmax;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = ntg/2; s > 0; s >>= 1) {
+            if (tiitg < s) {
+                rv[tiitg] = max(rv[tiitg], rv[tiitg + s]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        const float vmax = rv[0];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float lsum = 0.0f;
+        for (int i = tiitg; i < ne; i += ntg) {
+            const float v = exp(wt[i] - vmax);
+            wt[i] = v;
+            lsum += v;
+        }
+        rv[tiitg] = lsum;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = ntg/2; s > 0; s >>= 1) {
+            if (tiitg < s) {
+                rv[tiitg] += rv[tiitg + s];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        const float inv = 1.0f/rv[0];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int i = tiitg; i < ne; i += ntg) {
+            wt[i] *= inv;
+        }
+    } else if (args.mode == 1) {
+        for (int i = tiitg; i < ne; i += ntg) {
+            wt[i] = 1.0f/(1.0f + exp(-wt[i]));
+        }
+    } else if (args.mode == 2) {
+        for (int i = tiitg; i < ne; i += ntg) {
+            const float v = wt[i];
+            wt[i] = sqrt(v > 20.0f ? v : log(1.0f + exp(v)));
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // a NaN never compares greater, so the argmax below would return the same
+    // expert every round; -FLT_MAX still loses to every real score
+    for (int i = tiitg; i < ne; i += ntg) {
+        float v = wt[i];
+        if (v != v) {
+            v = -FLT_MAX;
+            wt[i] = v;
+        }
+        sel[i] = args.has_bias ? v + bias[i] : v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int k = 0; k < nu; ++k) {
+        float bv = -INFINITY;
+        int   bi = ne;
+        for (int i = tiitg; i < ne; i += ntg) {
+            const float v = sel[i];
+            if (v > bv || (v == bv && i < bi)) {
+                bv = v;
+                bi = i;
+            }
+        }
+        rv[tiitg] = bv;
+        si[tiitg] = bi;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = ntg/2; s > 0; s >>= 1) {
+            if (tiitg < s) {
+                const float ov = rv[tiitg + s];
+                const int   oi = si[tiitg + s];
+                if (ov > rv[tiitg] || (ov == rv[tiitg] && oi < si[tiitg])) {
+                    rv[tiitg] = ov;
+                    si[tiitg] = oi;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        if (tiitg == 0) {
+            const int e = si[0];
+            ids[k]     = e;
+            weights[k] = wt[e];
+            sel[e]     = -INFINITY;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    }
+
+    if (args.with_norm != 0) {
+        float lsum = 0.0f;
+        for (int i = tiitg; i < nu; i += ntg) {
+            lsum += weights[i];
+        }
+        rv[tiitg] = lsum;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = ntg/2; s > 0; s >>= 1) {
+            if (tiitg < s) {
+                rv[tiitg] += rv[tiitg + s];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        const float inv = 1.0f/max(rv[0], args.clamp);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int i = tiitg; i < nu; i += ntg) {
+            weights[i] *= inv;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    }
+
+    if (args.delayed_softmax != 0) {
+        float lmax = -INFINITY;
+        for (int i = tiitg; i < nu; i += ntg) {
+            lmax = max(lmax, weights[i]);
+        }
+        rv[tiitg] = lmax;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = ntg/2; s > 0; s >>= 1) {
+            if (tiitg < s) {
+                rv[tiitg] = max(rv[tiitg], rv[tiitg + s]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        const float vmax = rv[0];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float lsum = 0.0f;
+        for (int i = tiitg; i < nu; i += ntg) {
+            const float v = exp(weights[i] - vmax);
+            weights[i] = v;
+            lsum += v;
+        }
+        rv[tiitg] = lsum;
+        threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+        for (uint s = ntg/2; s > 0; s >>= 1) {
+            if (tiitg < s) {
+                rv[tiitg] += rv[tiitg + s];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        const float inv = 1.0f/rv[0];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int i = tiitg; i < nu; i += ntg) {
+            weights[i] *= inv;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    }
+
+    if (args.scale != 1.0f) {
+        for (int i = tiitg; i < nu; i += ntg) {
+            weights[i] *= args.scale;
+        }
+    }
+}

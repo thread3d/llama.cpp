@@ -1,5 +1,21 @@
 #include "llama-model-loader.h"
 
+#ifdef TOSH_ENABLE_DYNAMIC_MOE
+#include "tosh-moe.h"
+#else
+static inline int          tosh_moe_slots_want(void)                     { return 0; }
+static inline void         tosh_moe_bind(const void *, const void *)     {}
+static inline void         tosh_moe_bind_experts(const void *, int)      {}
+static inline void         tosh_moe_bind_fixed(const void *, int)        {}
+static inline void         tosh_moe_unbind_all(void)                     {}
+static inline void         tosh_moe_layer_set(const void *, int, int)    {}
+static inline void         tosh_moe_bind_state(const void *, const void *) {}
+static inline void         tosh_moe_set_stage(const void *)                {}
+static inline const void * tosh_moe_stage(void)                          { return nullptr; }
+static inline const void * tosh_moe_host_buft(void)                       { return nullptr; }
+static inline int          tosh_moe_state_ints(int, int, int)             { return 0; }
+#endif
+
 #include "ggml-alloc.h"
 #include "ggml.h"
 #include "gguf.h"
@@ -39,6 +55,9 @@ const char * llama_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_BF16:      name = LLAMA_FTYPE_PREFIX "BF16"; break;
         case LLAMA_FTYPE_MOSTLY_Q1_0:      name = LLAMA_FTYPE_PREFIX "Q1_0"; break;
         case LLAMA_FTYPE_MOSTLY_Q2_0:      name = LLAMA_FTYPE_PREFIX "Q2_0"; break;
+        case LLAMA_FTYPE_MOSTLY_PQ2_0:
+        case LLAMA_FTYPE_MOSTLY_PQ2_0_LEGACY: name = LLAMA_FTYPE_PREFIX "PQ2_0 - 2.13 bpw"; break;
+        case LLAMA_FTYPE_MOSTLY_PTQ1_0:    name = LLAMA_FTYPE_PREFIX "PTQ1_0 - 1.75 bpw"; break;
         case LLAMA_FTYPE_MOSTLY_Q4_0:      name = LLAMA_FTYPE_PREFIX "Q4_0"; break;
         case LLAMA_FTYPE_MOSTLY_Q4_1:      name = LLAMA_FTYPE_PREFIX "Q4_1"; break;
         case LLAMA_FTYPE_MOSTLY_Q5_0:      name = LLAMA_FTYPE_PREFIX "Q5_0"; break;
@@ -408,8 +427,11 @@ namespace GGUFMeta {
         return get_arr(llm_kv(kid), result, required);
     }
 
+    template bool llama_model_loader::get_arr<std::string>(const std::string & key, std::vector<std::string> & result, bool required);
+    template bool llama_model_loader::get_arr<int32_t>(const std::string & key, std::vector<int32_t> & result, bool required);
     template bool llama_model_loader::get_arr<std::vector<std::string>>(enum llm_kv kid, std::vector<std::string> & result, bool required);
     template bool llama_model_loader::get_arr<std::array<int32_t, 512>>(enum llm_kv kid, std::array<int32_t, 512> & result, bool required);
+    template bool llama_model_loader::get_arr<std::array<int,     4>>(enum llm_kv kid, std::array<int,     4>   & result, bool required);
     template bool llama_model_loader::get_arr<std::vector<int32_t>>(enum llm_kv kid, std::vector<int32_t> & result, bool required);
     template bool llama_model_loader::get_arr<std::array<uint32_t, LLAMA_MAX_LAYERS>>(enum llm_kv kid, std::array<uint32_t, LLAMA_MAX_LAYERS> & result, bool required);
     template bool llama_model_loader::get_arr<std::vector<uint32_t>>(enum llm_kv kid, std::vector<uint32_t> & result, bool required);
@@ -438,6 +460,9 @@ namespace GGUFMeta {
     }
 
     template bool llama_model_loader::get_key<bool>       (enum llm_kv kid, bool & result,        bool required);
+    template bool llama_model_loader::get_key<bool>       (const std::string & key, bool & result,        bool required);
+    template bool llama_model_loader::get_key<uint32_t>   (const std::string & key, uint32_t & result,    bool required);
+    template bool llama_model_loader::get_key<std::string>(const std::string & key, std::string & result, bool required);
     template bool llama_model_loader::get_key<float>      (enum llm_kv kid, float & result,       bool required);
     template bool llama_model_loader::get_key<uint32_t>   (enum llm_kv kid, uint32_t & result,    bool required);
     template bool llama_model_loader::get_key<std::string>(enum llm_kv kid, std::string & result, bool required);
@@ -543,6 +568,10 @@ llama_model_loader::llama_model_loader(
         const llama_model_kv_override * param_overrides_p,
         const llama_model_tensor_buft_override * param_tensor_buft_overrides_p)
         : metadata(meta), set_tensor_data(set_tensor_data), set_tensor_data_ud(set_tensor_data_ud) {
+    // the bindings are keyed by tensor pointer, so a previous model's entries have to go or a
+    // freed address can be reused and match the wrong bank
+    tosh_moe_unbind_all();
+
     int trace = 0;
     if (getenv("LLAMA_TRACE")) {
         trace = atoi(getenv("LLAMA_TRACE"));
@@ -772,6 +801,8 @@ llama_model_loader::llama_model_loader(
             case GGML_TYPE_NVFP4:   ftype = LLAMA_FTYPE_MOSTLY_NVFP4;   break;
             case GGML_TYPE_Q1_0:    ftype = LLAMA_FTYPE_MOSTLY_Q1_0;    break;
             case GGML_TYPE_Q2_0:    ftype = LLAMA_FTYPE_MOSTLY_Q2_0;    break;
+            case GGML_TYPE_PQ2_0:   ftype = LLAMA_FTYPE_MOSTLY_PQ2_0;   break;
+            case GGML_TYPE_PTQ1_0:  ftype = LLAMA_FTYPE_MOSTLY_PTQ1_0;  break;
             default:
                 {
                     LLAMA_LOG_WARN("%s: unknown type %s\n", __func__, ggml_type_name(type_max));
@@ -1121,6 +1152,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             int max_n_tensors = n_tensors;
             max_n_tensors += 1;                   // duplicated output tensor
             max_n_tensors += hparams.n_layer()*2; // duplicated rope freq tensors
+            max_n_tensors += hparams.n_layer()*3; // expert slot banks
             if (files.empty()) {
                 max_n_tensors += hparams.n_layer()*256; // this should be well above what any model actually uses
             }
@@ -1358,6 +1390,20 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return nullptr;
     }
 
+    // Slots enough for every expert means nothing is ever evicted, so the cache would spend a
+    // pick and a fetch per layer to conclude that nothing is missing. Send the weights straight
+    // to the device, which is where the bank of slots would have put them anyway. Redirecting
+    // the buffer type is the whole of it: skipping only the bank would leave the weights in
+    // host memory and the matmul reading them scattered, which is far slower than the cache.
+    {
+        const int n_slots_all = tosh_moe_slots_want();
+        if (n_slots_all > 0 && ne.size() == 3 && t_meta.ne[2] <= n_slots_all &&
+            (const void *) buft == tosh_moe_host_buft() &&
+            std::string(ggml_get_name(&t_meta)).find("_exps.weight") != std::string::npos) {
+            buft = ggml_backend_dev_buffer_type(ggml_backend_buft_get_device(buft));
+        }
+    }
+
     ggml_context * ctx = ctx_for_buft(buft);
 
     // if duplicated, check if the original tensor was allocated in the same buffer type context and avoid creating a new one
@@ -1369,6 +1415,100 @@ struct ggml_tensor * llama_model_loader::create_tensor(
     }
 
     const bool duplicated = flags & TENSOR_DUPLICATED;
+
+    // An expert bank the user placed in host memory gets a bank of device slots beside it,
+    // plus the small i32 state the cache kernels keep between steps. The graph reads the
+    // slots; the host bank is only ever touched by the fetch.
+    const int n_slots = tosh_moe_slots_want();
+    if (n_slots > 0 && !duplicated && ne.size() == 3 && t_meta.ne[2] >= n_slots &&
+        (const void *) buft == tosh_moe_host_buft() &&
+        std::string(ggml_get_name(&t_meta)).find("_exps.weight") != std::string::npos) {
+        const int64_t n_exp = t_meta.ne[2];
+        const bool split_bank = getenv("TOSH_MOE_SPLIT_BANK") != nullptr && n_slots < n_exp;
+
+        ggml_backend_buffer_type_t buft_dev = ggml_backend_dev_buffer_type(ggml_backend_buft_get_device(buft));
+
+        // A CPU-owned bank lets the existing scheduler build real host -> Metal prefetch
+        // splits for wide batches. Decode still wraps these stable pages for direct GPU fetch.
+        ggml_context * host_ctx = ctx;
+        if (split_bank || getenv("TOSH_MOE_CPU_BANK") != nullptr) {
+            host_ctx = ctx_for_buft(ggml_backend_cpu_buffer_type());
+        }
+        ggml_tensor host_meta = t_meta;
+        if (split_bank) {
+            host_meta.ne[2] = n_exp - n_slots;
+        }
+        ggml_tensor * host = ggml_dup_tensor(host_ctx, &host_meta);
+
+        ggml_tensor slots_meta = t_meta;
+        const int split_ring = split_bank ? std::max(1, std::min((int) n_exp - n_slots, getenv("TOSH_MOE_SPLIT_RING") ? atoi(getenv("TOSH_MOE_SPLIT_RING")) : 8)) : 0;
+        slots_meta.ne[2] = n_slots + split_ring;
+
+        const std::string slots_name = std::string(ggml_get_name(&t_meta)) + ".slots";
+        const std::string host_name = split_bank
+            ? std::string(ggml_get_name(&t_meta)) + ".cold"
+            : std::string(ggml_get_name(&t_meta));
+        ggml_set_name(host, host_name.c_str());
+        ggml_tensor * slots = ggml_dup_tensor(ctx_for_buft(buft_dev), &slots_meta);
+        ggml_set_name(slots, slots_name.c_str());
+
+        if (split_bank) {
+            const std::string original_name = ggml_get_name(&t_meta);
+            const auto original = require_weight(original_name.c_str());
+            weights_map.erase(original_name);
+            weights_map.emplace(slots_name, llama_tensor_weight(files.at(original.idx).get(), original.idx,
+                        original.offs, slots));
+            weights_map.emplace(host_name, llama_tensor_weight(files.at(original.idx).get(), original.idx,
+                        original.offs + (size_t) n_slots*t_meta.nb[2], host));
+        }
+
+        const int state_slots = (int) slots_meta.ne[2];
+        const int max_fetch = split_bank ? split_ring : state_slots;
+        const int n_state   = tosh_moe_state_ints((int) n_exp, state_slots, max_fetch);
+
+        ggml_tensor state_meta = {};
+        state_meta.type  = GGML_TYPE_I32;
+        state_meta.ne[0] = n_state;
+        state_meta.ne[1] = state_meta.ne[2] = state_meta.ne[3] = 1;
+        state_meta.nb[0] = ggml_type_size(GGML_TYPE_I32);
+        state_meta.nb[1] = state_meta.nb[2] = state_meta.nb[3] = state_meta.nb[0]*n_state;
+
+        int il = -1;
+        sscanf(ggml_get_name(&t_meta), "blk.%d.", &il);
+
+        // the banks of a layer share one routing, so they share the state the pick keeps
+        ggml_tensor * state = il >= 0 && tosh_moe_state_of_layer.count(il) ? tosh_moe_state_of_layer[il] : nullptr;
+        if (!state) {
+            const std::string state_name = std::string(ggml_get_name(&t_meta)) + ".state";
+            state = ggml_dup_tensor(ctx_for_buft(buft_dev), &state_meta);
+            ggml_set_name(state, state_name.c_str());
+            if (il >= 0) {
+                tosh_moe_state_of_layer[il] = state;
+            }
+        }
+
+        tosh_moe_bind(slots, host);
+        tosh_moe_bind_experts(slots, (int) n_exp);
+        tosh_moe_bind_fixed(slots, split_bank ? n_slots : 0);
+        tosh_moe_bind_state(slots, state);
+
+        // one scratch the size of the widest bank, reused by every layer: a batch too wide for
+        // the cache copies its bank here in one go and reads it from the device. The registry
+        // is the source of truth, not a local static, which would survive into the next load.
+        const ggml_tensor * have = (const ggml_tensor *) tosh_moe_stage();
+        if (!have || ggml_nbytes(have) < ggml_nbytes(&t_meta)) {
+            ggml_tensor * stage = ggml_dup_tensor(ctx_for_buft(buft_dev), &t_meta);
+            ggml_set_name(stage, "tosh.moe.stage");
+            tosh_moe_set_stage(stage);
+        }
+        if (il >= 0) {
+            tosh_moe_layer_set(slots, il, (int) n_exp);
+        }
+
+        n_created++;
+
+        return slots;
+    }
 
     struct ggml_tensor * tensor = ggml_dup_tensor(ctx, &t_meta);
     ggml_set_name(tensor, ggml_get_name(&t_meta));
@@ -1770,12 +1910,28 @@ bool llama_model_loader::load_all_data(
     if (size_done >= size_data) {
         // unmap offloaded tensors and metadata
         if (use_mmap) {
+            // pin the pages backing the weights kept in system memory for faster H2D copies
+            bool (*reg_fn)(void *, size_t) = nullptr;
+            void (*unreg_fn)(void *) = nullptr;
+            for (size_t i = 0; i < ggml_backend_dev_count() && !reg_fn; i++) {
+                ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(ggml_backend_dev_get(i));
+                reg_fn   = (bool (*)(void *, size_t)) ggml_backend_reg_get_proc_address(reg, "ggml_backend_register_host_buffer");
+                unreg_fn = (void (*)(void *))         ggml_backend_reg_get_proc_address(reg, "ggml_backend_unregister_host_buffer");
+            }
+
             for (uint32_t idx = 0; idx < mappings.size(); idx++) {
                 const auto & mmap_used = mmaps_used.at(idx);
                 auto & mapping = mappings.at(idx);
                 mapping->unmap_fragment(0, mmap_used.first);
                 if (mmap_used.second != 0) {
                     mapping->unmap_fragment(mmap_used.second, mapping->size());
+                }
+                if (mmap_used.second > mmap_used.first) {
+                    size_t n_registered = mapping->register_host(mmap_used.first, mmap_used.second, reg_fn, unreg_fn);
+                    if (n_registered > 0) {
+                        LLAMA_LOG_INFO("%s: pinned %.2f MiB of mapped model memory for faster H2D transfers\n",
+                                __func__, n_registered / 1024.0 / 1024.0);
+                    }
                 }
             }
         }

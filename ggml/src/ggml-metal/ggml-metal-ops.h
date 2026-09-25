@@ -26,6 +26,14 @@ int ggml_metal_op_n_nodes(ggml_metal_op_t ctx);
 
 int ggml_metal_op_encode(ggml_metal_op_t ctx, int idx);
 
+// Returns the Dynamic MoE layer for a cached expert op, or -1 for every normal op.
+int  ggml_metal_op_cached_moe_layer(const struct ggml_tensor * op);
+const struct ggml_tensor * ggml_metal_op_cached_moe_host(const struct ggml_tensor * op);
+void ggml_metal_op_cached_moe_ids_set(const struct ggml_tensor * slots, struct ggml_metal_buffer_id ids);
+void ggml_metal_op_cached_moe_ids_clear(void);
+void ggml_metal_op_cached_moe_full_set(const struct ggml_tensor * slots, struct ggml_metal_buffer_id cold);
+void ggml_metal_op_cached_moe_full_clear(void);
+
 //
 // available ops:
 //
@@ -60,6 +68,7 @@ int ggml_metal_op_lightning_indexer (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_dsv4_hc           (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_soft_max          (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_ssm_conv          (ggml_metal_op_t ctx, int idx);
+int ggml_metal_op_turbo_wht         (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_ssm_scan          (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_rwkv              (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_gated_delta_net   (ggml_metal_op_t ctx, int idx);
@@ -69,6 +78,7 @@ int ggml_metal_op_cpy               (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_pool_1d           (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_pool_2d           (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_fwht              (ggml_metal_op_t ctx, int idx);
+int ggml_metal_op_fwht_fused        (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_mul_mat           (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_mul_mat_id        (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_add_id            (ggml_metal_op_t ctx, int idx);
@@ -94,6 +104,7 @@ int ggml_metal_op_roll              (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_arange            (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_timestep_embedding(ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_argmax            (ggml_metal_op_t ctx, int idx);
+int ggml_metal_op_topk_moe          (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_argsort           (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_top_k             (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_tri               (ggml_metal_op_t ctx, int idx);

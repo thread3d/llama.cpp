@@ -1852,6 +1852,64 @@ static void test_convert_responses_to_chatcmpl() {
         assert_equals(false, result.at("stream").get<bool>());
     }
 
+    // Assistant items may omit 'type': clients that replay their own history
+    // rebuild the turn from stream deltas and only the completed item carries it
+    {
+        json input = json::parse(R"({
+            "input": [
+                {
+                    "role": "developer",
+                    "content": "developer1"
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "assistant1"
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": "assistant2"
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "hello1"
+                        }
+                    ]
+                }
+            ],
+            "model": "test-model"
+        })");
+
+        json result = server_chat_convert_responses_to_chatcmpl(input);
+
+        assert_equals((size_t)3, result.at("messages").size());
+
+        const auto & dev_msg = result.at("messages")[0];
+        assert_equals(std::string("developer"), dev_msg.at("role").get<std::string>());
+        assert_equals(std::string("developer1"), dev_msg.at("content")[0].at("text").get<std::string>());
+
+        // the two assistant items merge into one message
+        const auto & asst_msg = result.at("messages")[1];
+        assert_equals(std::string("assistant"), asst_msg.at("role").get<std::string>());
+        assert_equals(false, asst_msg.contains("type"));
+        assert_equals((size_t)2, asst_msg.at("content").size());
+        assert_equals(std::string("text"), asst_msg.at("content")[0].at("type").get<std::string>());
+        assert_equals(std::string("assistant1"), asst_msg.at("content")[0].at("text").get<std::string>());
+        assert_equals(std::string("text"), asst_msg.at("content")[1].at("type").get<std::string>());
+        assert_equals(std::string("assistant2"), asst_msg.at("content")[1].at("text").get<std::string>());
+
+        const auto & user_msg = result.at("messages")[2];
+        assert_equals(std::string("user"), user_msg.at("role").get<std::string>());
+        assert_equals(std::string("hello1"), user_msg.at("content")[0].at("text").get<std::string>());
+    }
+
     // Test string input
     {
         json input = json::parse(R"({

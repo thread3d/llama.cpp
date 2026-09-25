@@ -1,6 +1,10 @@
 
 #pragma once
 
+// no arch has a SIMD dot for the Prism group-128 types yet
+#define ggml_vec_dot_pq2_0_q8_0_generic ggml_vec_dot_pq2_0_q8_0
+#define ggml_vec_dot_ptq1_0_q8_0_generic ggml_vec_dot_ptq1_0_q8_0
+
 // Rename `_generic` functions if no native implementation is available.
 // This effectively selects the generic implementation.
 

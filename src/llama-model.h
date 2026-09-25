@@ -228,6 +228,10 @@ struct llama_layer_nextn {
     struct ggml_tensor * shared_head_head_s    = nullptr;
     struct ggml_tensor * shared_head_head_in_s = nullptr;
     struct ggml_tensor * shared_head_norm      = nullptr;
+
+    struct ggml_tensor * hc_head_norm          = nullptr;
+    struct ggml_tensor * hc_head_down          = nullptr;
+    struct ggml_tensor * hc_head_up            = nullptr;
 };
 
 struct llama_layer_switch_lora {
@@ -601,6 +605,9 @@ struct llama_device {
 
 struct llama_meta_device_get_split_state_userdata {
     size_t                     n_devices;
+    // where this group starts in the global --tensor-split list; groups past the first would
+    // otherwise all read the same leading entries
+    size_t                     dev_offset;
     const struct llama_model * model;
 };
 
@@ -703,11 +710,26 @@ struct llama_model {
     // for quantize-stats only
     std::vector<std::pair<std::string, struct ggml_tensor *>> tensors_by_name;
 
+    // Prism ML Hadamard-folded weights (prism.hadamard.*): the forward transform is applied to the
+    // activation of every folded matmul, the inverse to rows looked up from latent tables
+    std::unordered_map<std::string, uint32_t> hadamard_weight_blocks;
+    std::unordered_map<std::string, uint32_t> hadamard_inverse_blocks;
+    std::map<uint32_t, std::vector<int32_t>> hadamard_sign_data;
+    bool hadamard_gdn_v_grouped = false;
+    llama_hadamard_rotations hadamard_rotations;
+    llama_hadamard_rotations hadamard_inverses;
+
     // for keeping track of associated LoRA adapters
     std::unordered_set<llama_adapter_lora *> loras;
 
     // statically allocated context for assigning
     struct llama_meta_device_get_split_state_userdata get_split_state_ud;
+
+    // one per group, so each carries its own offset; the single-group case still uses the above
+    std::vector<llama_meta_device_get_split_state_userdata> get_split_state_uds;
+
+    // devices per tensor-parallel group, 1 when there are no groups
+    size_t tensor_group_size = 1;
 
     int64_t t_load_us  = 0;
     int64_t t_start_us = 0;
@@ -812,6 +834,9 @@ struct llama_model_base : public llama_model {
     void load_hparams(llama_model_loader & ml) override;
     void load_vocab  (llama_model_loader & ml) override;
     bool load_tensors(llama_model_loader & ml) override;
+
+    void load_hadamard_hparams(llama_model_loader & ml);
+    void create_hadamard_tensors(bool no_alloc);
 
     // model must define these
     void load_arch_hparams(llama_model_loader & ml) override = 0;

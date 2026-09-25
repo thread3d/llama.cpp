@@ -165,6 +165,10 @@ template [[host_name("kernel_bin_fuse_f32_f32_f32")]]   kernel kernel_bin_fuse_t
 template [[host_name("kernel_bin_fuse_f32_f32_f32_4")]] kernel kernel_bin_fuse_t kernel_bin_fuse_impl<float4, float4, float4>;
 template [[host_name("kernel_bin_fuse_f16_f16_f16")]]   kernel kernel_bin_fuse_t kernel_bin_fuse_impl<half,   half,   half>;
 template [[host_name("kernel_bin_fuse_f16_f16_f16_4")]] kernel kernel_bin_fuse_t kernel_bin_fuse_impl<half4,  half4,  half4>;
+// f16 src1 against an f32 accumulator: the upcast add for the f16 allreduce transport.
+// (bf16 src1 is deliberately not instantiated: the scalar bf16e kernels fault the AMD driver
+// on these cards - see .bench/bf16-stage/fault-hunt.md.)
+template [[host_name("kernel_bin_fuse_f32_f16_f32")]]   kernel kernel_bin_fuse_t kernel_bin_fuse_impl<float,  half,   float>;
 
 kernel void kernel_add_id(
         constant ggml_metal_kargs_add_id & args,

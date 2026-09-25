@@ -516,6 +516,15 @@ static ggml_type ggml_type_from_name(const std::string & s) {
     if (s == "iq4_nl") {
         return GGML_TYPE_IQ4_NL;
     }
+    if (s == "turbo2") {
+        return GGML_TYPE_TURBO2_0;
+    }
+    if (s == "turbo3") {
+        return GGML_TYPE_TURBO3_0;
+    }
+    if (s == "turbo4") {
+        return GGML_TYPE_TURBO4_0;
+    }
 
     return GGML_TYPE_COUNT;
 }
@@ -978,6 +987,16 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                         auto * buft = ggml_backend_dev_buffer_type(dev);
                         if (buft) {
                             buft_list[ggml_backend_buft_name(buft)] = buft;
+                        }
+
+                        // a backend can offer more than its default one
+                        auto * reg = ggml_backend_dev_backend_reg(dev);
+                        auto fn = reg ? (ggml_backend_dev_get_extra_bufts_t)
+                            ggml_backend_reg_get_proc_address(reg, "ggml_backend_dev_get_extra_bufts") : nullptr;
+                        if (fn) {
+                            for (auto ** bufts = fn(dev); bufts && *bufts; ++bufts) {
+                                buft_list[ggml_backend_buft_name(*bufts)] = *bufts;
+                            }
                         }
                     }
                 }
@@ -1488,6 +1507,20 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
     return instances;
 }
 
+// Dynamic MoE: the run is decided by how many expert slots the card holds, so the report says
+// that instead of the CPU-expert count and the tensor override, which are fixed while it is on.
+static int tosh_bench_moe_slots() {
+    const char * mode  = getenv("TOSH_MOE_MODE");
+    const char * slots = getenv("TOSH_MOE_SLOTS");
+    if (!mode || !slots || strcmp(mode, "off") == 0) {
+        return 0;
+    }
+
+    const int n = atoi(slots);
+
+    return n > 0 ? n : 0;
+}
+
 struct test {
     static const std::string build_commit;
     static const int         build_number;
@@ -1507,6 +1540,7 @@ struct test {
     ggml_type                type_v;
     int                      n_gpu_layers;
     int                      n_cpu_moe;
+    int                      dmoe_k;
     llama_split_mode         split_mode;
     llama_load_mode          load_mode;
     llama_lazy_mode          lazy_mode;
@@ -1547,6 +1581,7 @@ struct test {
         type_v         = inst.type_v;
         n_gpu_layers   = inst.n_gpu_layers;
         n_cpu_moe      = inst.n_cpu_moe;
+        dmoe_k         = tosh_bench_moe_slots();
         split_mode     = inst.split_mode;
         load_mode      = inst.load_mode;
         lazy_mode      = inst.lazy_mode;
@@ -1615,7 +1650,8 @@ struct test {
             "build_commit",   "build_number",   "cpu_info",      "gpu_info",       "backends",
             "model_filename", "model_type",     "model_size",    "model_n_params", "n_batch",
             "n_ubatch",       "n_threads",      "cpu_mask",      "cpu_strict",     "poll",
-            "type_k",         "type_v",         "n_gpu_layers",  "n_cpu_moe",      "split_mode",
+            "type_k",         "type_v",         "n_gpu_layers",  "n_cpu_moe",      "dmoe_k",
+            "split_mode",
             "main_gpu",       "no_kv_offload",  "flash_attn",    "devices",        "tensor_split",
             "tensor_buft_overrides",            "load_mode",     "lazy_mode",
             "embeddings",
@@ -1632,7 +1668,7 @@ struct test {
         if (field == "build_number" || field == "n_batch" || field == "n_ubatch" || field == "n_threads" ||
             field == "poll" || field == "model_size" || field == "model_n_params" || field == "n_gpu_layers" ||
             field == "main_gpu" || field == "n_prompt" || field == "n_gen" || field == "n_depth" || field == "avg_ns" ||
-            field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" ||
+            field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" || field == "dmoe_k" ||
             field == "fit_target" || field == "fit_min_ctx" || field == "flash_attn") {
             return INT;
         }
@@ -1705,6 +1741,7 @@ struct test {
                                             ggml_type_name(type_v),
                                             std::to_string(n_gpu_layers),
                                             std::to_string(n_cpu_moe),
+                                            std::to_string(dmoe_k),
                                             split_mode_str(split_mode),
                                             std::to_string(main_gpu),
                                             std::to_string(no_kv_offload),
@@ -1956,6 +1993,9 @@ struct markdown_printer : public printer {
         if (field == "tensor_buft_overrides") {
             return "ot";
         }
+        if (field == "dmoe_k") {
+            return "K";
+        }
         if (field == "fit_target") {
             return "fitt";
         }
@@ -1977,7 +2017,10 @@ struct markdown_printer : public printer {
         if (!is_cpu_backend) {
             fields.emplace_back("n_gpu_layers");
         }
-        if (params.n_cpu_moe.size() > 1 || params.n_cpu_moe != cmd_params_defaults.n_cpu_moe) {
+        const int dmoe_k = tosh_bench_moe_slots();
+        if (dmoe_k > 0) {
+            fields.emplace_back("dmoe_k");
+        } else if (params.n_cpu_moe.size() > 1 || params.n_cpu_moe != cmd_params_defaults.n_cpu_moe) {
             fields.emplace_back("n_cpu_moe");
         }
         if (params.n_threads.size() > 1 || params.n_threads != cmd_params_defaults.n_threads || is_cpu_backend) {
@@ -2022,7 +2065,8 @@ struct markdown_printer : public printer {
         if (params.tensor_split.size() > 1 || params.tensor_split != cmd_params_defaults.tensor_split) {
             fields.emplace_back("tensor_split");
         }
-        if (params.tensor_buft_overrides.size() > 1 || !vec_vec_tensor_buft_override_equal(params.tensor_buft_overrides, cmd_params_defaults.tensor_buft_overrides)) {
+        if (dmoe_k == 0 &&
+            (params.tensor_buft_overrides.size() > 1 || !vec_vec_tensor_buft_override_equal(params.tensor_buft_overrides, cmd_params_defaults.tensor_buft_overrides))) {
             fields.emplace_back("tensor_buft_overrides");
         }
         if (params.load_mode.size() > 1 || params.load_mode != cmd_params_defaults.load_mode) {
@@ -2121,7 +2165,9 @@ struct markdown_printer : public printer {
     }
 
     void print_footer() override {
-        fprintf(fout, "\nbuild: %s (%d)\n", test::build_commit.c_str(), test::build_number);
+        // the build number only tracks upstream, so name the engine version too
+        fprintf(fout, "\nbuild: %s (%d), ToshLLM engine %s\n", test::build_commit.c_str(), test::build_number,
+                common_tosh_version());
     }
 };
 

@@ -394,6 +394,18 @@ void common_init() {
     llama_log_set(common_log_default_callback, NULL);
 }
 
+// Stamped by build-engines.sh from VERSION. Passed unquoted so the value needs no
+// escaping through cmake, hence the stringify.
+#ifndef TOSH_VERSION
+#define TOSH_VERSION unknown
+#endif
+#define TOSH_STRINGIFY2(x) #x
+#define TOSH_STRINGIFY(x) TOSH_STRINGIFY2(x)
+
+const char * common_tosh_version(void) {
+    return TOSH_STRINGIFY(TOSH_VERSION);
+}
+
 void common_params_print_info(const common_params & params, bool print_devices) {
 #ifdef NDEBUG
     const char * build_type = "";
@@ -401,6 +413,14 @@ void common_params_print_info(const common_params & params, bool print_devices) 
     const char * build_type = " (debug)";
 #endif
     COM_TRC("%s: build %d (%s) with %s for %s%s\n", __func__, llama_build_number(), llama_commit(), llama_compiler(), llama_build_target(), build_type);
+
+    // The build number above only tracks the upstream commit, unchanged across
+    // releases that only touch the patch. No env var means a direct CLI run.
+    {
+        const char * app_version = std::getenv("TOSH_APP_VERSION");
+        COM_INF("%s: ToshLLM engine %s (app %s)\n", __func__, common_tosh_version(),
+                app_version ? app_version : "standalone");
+    }
 
     const int verbosity = common_log_get_verbosity_thold();
     COM_INF("%s: verbosity = %d (adjust with the `-lv N` CLI arg)\n", __func__, verbosity);

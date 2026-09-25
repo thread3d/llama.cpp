@@ -271,8 +271,10 @@ llama_model_hy_v3::graph_mtp::graph_mtp(const llama_model & model, const llm_gra
 
     res->add_input(std::move(inp));
 
+    const bool kv_only = mtp_kv_only();
+
     ggml_tensor * inp_pos     = build_inp_pos();
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = kv_only ? nullptr : build_inp_out_ids();
     auto * inp_attn           = build_attn_inp_kv();
 
     ggml_tensor * h_norm = build_norm(h_input, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
@@ -307,6 +309,11 @@ llama_model_hy_v3::graph_mtp::graph_mtp(const llama_model & model, const llm_gra
         Kcur = ggml_rope_ext(ctx0, Kcur, inp_pos, rope_factors,
                 n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
                 ext_factor, attn_factor, beta_fast, beta_slow);
+
+        if (kv_only) {
+            build_attn_kv_store(inp_attn, Kcur, Vcur, il);
+            return;
+        }
 
         const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 

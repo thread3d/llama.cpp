@@ -29,10 +29,19 @@ set(METALLIB_KERNELS_COMMON     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/common.h")
 set(METALLIB_KERNELS_DEQUANTIZE "${CMAKE_CURRENT_SOURCE_DIR}/kernels/dequantize.h")
 set(METALLIB_KERNELS_QUANTIZE   "${CMAKE_CURRENT_SOURCE_DIR}/kernels/quantize.h")
 
+# the expert cache kernels ride along as one more library when the dynamic MoE is on
+if (TOSH_ENABLE_DYNAMIC_MOE)
+    configure_file(${CMAKE_SOURCE_DIR}/tosh-moe/tosh-moe-lru.metal
+                   ${CMAKE_CURRENT_SOURCE_DIR}/kernels/tosh_moe.metal COPYONLY)
+endif()
+
 set(METALLIB_KERNEL_SOURCES
     kernels/fa.metal
+    kernels/fa_w64.metal
     kernels/mul_mv.metal
+    kernels/mul_mv_w64.metal
     kernels/mul_mm.metal
+    kernels/mul_mm_w64.metal
     kernels/quantize.metal
     kernels/softmax.metal
     kernels/norm.metal
@@ -44,12 +53,14 @@ set(METALLIB_KERNEL_SOURCES
     kernels/wkv.metal
     kernels/gated_delta_net.metal
     kernels/solve_tri.metal
+    kernels/turbo.metal
     kernels/rope.metal
     kernels/conv.metal
     kernels/upscale.metal
     kernels/argsort.metal
     kernels/pool.metal
     kernels/misc.metal
+    kernels/tosh_moe.metal
 )
 
 if (GGML_METAL_EMBED_LIBRARY)
@@ -237,4 +248,9 @@ if (NOT GGML_METAL_EMBED_LIBRARY)
         FILES ${METALLIB_FILES}
         DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
+endif()
+
+if (TOSH_ENABLE_DYNAMIC_MOE)
+    target_include_directories(ggml-metal PRIVATE ${CMAKE_SOURCE_DIR}/tosh-moe)
+    target_compile_definitions(ggml-metal PRIVATE TOSH_ENABLE_DYNAMIC_MOE)
 endif()

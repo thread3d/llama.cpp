@@ -6,7 +6,9 @@ void llama_model_qwen35moe::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp, false);
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,       hparams.f_norm_rms_eps);
 
-    ml.get_key_or_arr(LLM_KV_ROPE_DIMENSION_SECTIONS,    hparams.rope_sections, 4, true);
+    // Some exports carry only the non-zero sections; rope_sections is zero-filled
+    // beforehand, so a shorter array lands identical to the padded four-entry form.
+    ml.get_arr(LLM_KV_ROPE_DIMENSION_SECTIONS, hparams.rope_sections, true);
 
     // Load linear attention (gated delta net) parameters
     ml.get_key(LLM_KV_SSM_CONV_KERNEL,    hparams.ssm_d_conv);
@@ -270,9 +272,8 @@ ggml_tensor * llama_model_qwen35moe::graph::build_norm_gated(
         ggml_tensor * gate,
         int           layer) {
     ggml_tensor * normalized = build_norm(input, weights, nullptr, LLM_NORM_RMS, layer);
-    ggml_tensor * gated_silu = ggml_silu(ctx0, gate);
-
-    return ggml_mul(ctx0, normalized, gated_silu);
+    // silu(gate)*normalized in one op
+    return ggml_swiglu_split(ctx0, gate, normalized);
 }
 
 ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn(
@@ -383,6 +384,8 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn_linear(
     beta = ggml_reshape_4d(ctx0, beta, 1, num_v_heads, n_seq_tokens, n_seqs);
     cb(beta, "beta", il);
 
+    ggml_tensor * beta_raw = beta;
+
     beta = ggml_sigmoid(ctx0, beta);
     cb(beta, "beta_sigmoid", il);
 
@@ -398,6 +401,13 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn_linear(
     cb(gate, "gate", il);
 
     gate = ggml_reshape_4d(ctx0, gate, 1, num_v_heads, n_seq_tokens, n_seqs);
+
+    // one token: the fused operator applies the activations itself. A prompt keeps them apart,
+    // where they run in parallel instead of on the operator's serial token loop
+    if (n_seq_tokens == 1) {
+        gdn_raw = { ggml_reshape_4d(ctx0, alpha, 1, num_v_heads, n_seq_tokens, n_seqs), beta_raw,
+                    model.layers[il].ssm_dt, model.layers[il].ssm_a };
+    }
 
     ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
     ggml_tensor * ssm_states_all  = mctx_cur->get_s_l(il);
@@ -470,6 +480,7 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn_linear(
     cb(v_conv, "v_conv_predelta", il);
 
     ggml_tensor * output = build_recurrent_attn(inp, ssm_states_all, q_conv, k_conv, v_conv, gate, beta, state, il);
+    gdn_raw = {};
 
     // z: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * n_tokens * n_seqs, head_dim]
     ggml_tensor * z_2d = ggml_reshape_4d(ctx0, z, head_v_dim, num_v_heads, n_seq_tokens, n_seqs);
@@ -583,6 +594,7 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llama_model & model, const llm
         ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
 
         tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
+        tok_embd = build_hadamard_lookup(tok_embd_w, tok_embd);
     } else {
         tok_embd = inp->embd;
     }
@@ -596,8 +608,10 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llama_model & model, const llm
 
     res->add_input(std::move(inp));
 
+    const bool kv_only = mtp_kv_only();
+
     ggml_tensor * inp_pos     = build_inp_pos();
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = kv_only ? nullptr : build_inp_out_ids();
 
     auto * inp_attn = build_attn_inp_kv();
 
@@ -654,6 +668,11 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llama_model & model, const llm
     Kcur = ggml_rope_multi(ctx0, Kcur, inp_pos, nullptr,
             n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
             ext_factor, attn_factor, beta_fast, beta_slow);
+
+    if (kv_only) {
+        build_attn_kv_store(inp_attn, Kcur, Vcur, il);
+        return;
+    }
 
     const float kq_scale = hparams.f_attention_scale == 0.0f
             ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;

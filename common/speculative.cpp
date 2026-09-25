@@ -941,6 +941,15 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     const int32_t * target_layer_ids   = nullptr; // model_dft's extract layer indices
     uint32_t        target_layer_ids_n = 0;
 
+    // acceptance backoff: when recent acceptance stays low, skip the draft block (fall back to
+    // AR) except for periodic probes, so unpredictable content stops paying the draft cost
+    // acceptance backoff: skip drafting while recent acceptance stays low (fall back to AR),
+    // probing periodically, so unpredictable content does not regress below the AR baseline
+    std::vector<float>   acc_ewma;     // per-seq EWMA of acceptance, starts at 1.0 (warm)
+    std::vector<int32_t> n_last_draft; // per-seq tokens drafted last step, 0 if skipped
+    std::vector<int32_t> steps_cold;   // per-seq skipped steps since the last probe
+    std::vector<int32_t> probe_gap;    // per-seq probe interval, doubles on a failed probe
+
     common_speculative_impl_draft_dflash(const common_params_speculative & params, uint32_t n_seq,
             common_speculative_type type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH)
         : common_speculative_impl(type, n_seq, params.draft.n_max)
@@ -1050,6 +1059,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         // DFlash2 reads its selector lattice from h_nextn and never consumes raw logits.
         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ !is_dflash2);
         llama_set_causal_attn(ctx_dft, causal_attn); // DFlash needs non-causal attention unless the model says otherwise
+
     }
 
     ~common_speculative_impl_draft_dflash() override {
@@ -1183,23 +1193,52 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         std::vector<int32_t> i_block_beg(n_seq, -1);
         std::vector<int32_t> n_block    (n_seq,  0);
 
+        static const float acc_min    = getenv("TOSH_DFLASH_ACC_MIN")   ? (float) atof(getenv("TOSH_DFLASH_ACC_MIN"))   : 0.6f;
+        static const int   probe_base = getenv("TOSH_DFLASH_PROBE")     ?         atoi(getenv("TOSH_DFLASH_PROBE"))     : 8;
+        static const int   probe_cap  = getenv("TOSH_DFLASH_PROBE_CAP") ?         atoi(getenv("TOSH_DFLASH_PROBE_CAP")) : 64;
+        if ((int) acc_ewma.size() != (int) n_seq) {
+            acc_ewma.assign(n_seq, 1.0f);
+            n_last_draft.assign(n_seq, 0);
+            steps_cold.assign(n_seq, 0);
+            probe_gap.assign(n_seq, probe_base);
+        }
+
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             auto & dp = dparams[seq_id];
             if (!dp.drafting) {
                 continue;
             }
 
+            // while backed off, probe every probe_gap steps and double the gap on a failed probe,
+            // so a durable cold streak decays toward AR yet a late recovery is still caught
+            if (acc_ewma[seq_id] < acc_min) {
+                if (steps_cold[seq_id] < probe_gap[seq_id]) {
+                    n_last_draft[seq_id] = 0;
+                    steps_cold[seq_id]++;
+                    continue;
+                }
+                steps_cold[seq_id] = 0;
+                probe_gap[seq_id] = std::min(probe_gap[seq_id] * 2, probe_cap);
+            } else {
+                steps_cold[seq_id] = 0;
+                probe_gap[seq_id] = probe_base;
+            }
+
             common_sampler_reset(smpls[seq_id].get());
 
             const int32_t n = (int32_t) dp.n_past;
 
-            const int32_t n_draft = params.n_max;
+            int32_t n_draft = params.n_max;
+            if (dp.n_max > 0) {
+                n_draft = std::min(n_draft, dp.n_max);
+            }
+            n_last_draft[seq_id] = n_draft;
 
             const int32_t n_block_tokens = n_draft + (is_dspark && sample_from_anchor ? 0 : 1);
             i_block_beg[seq_id] = batch.n_tokens;
             n_block    [seq_id] = n_block_tokens;
             for (int32_t i = 0; i < n_block_tokens; ++i) {
-                common_batch_add(batch, i == 0 ? dp.id_last : mask_token_id, n + i, { seq_id }, !is_dflash2);
+                common_batch_add(batch, i == 0 ? dp.id_last : mask_token_id, n + i, { seq_id }, true);
             }
         }
 
@@ -1316,12 +1355,28 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         }
     }
 
-    void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/, bool /*is_other*/) override {
-        // noop
+    void accept(llama_seq_id seq_id, uint16_t n_accepted, bool is_other) override {
+        if (is_other || seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+            return;
+        }
+        if ((int) acc_ewma.size() != (int) n_seq || n_last_draft[seq_id] <= 0) {
+            return;
+        }
+        static const float alpha = getenv("TOSH_DFLASH_EWMA") ? (float) atof(getenv("TOSH_DFLASH_EWMA")) : 0.5f;
+        const float acc = std::min(1.0f, (float) n_accepted / (float) n_last_draft[seq_id]);
+        const float a = acc > acc_ewma[seq_id] ? 0.2f : alpha;  // rise fast, fall at alpha
+        acc_ewma[seq_id] = a * acc_ewma[seq_id] + (1.0f - a) * acc;
+        n_last_draft[seq_id] = 0;
     }
 };
 
 struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+    // acceptance backoff, same policy as the DFlash planner
+    std::vector<float>   acc_ewma;     // per-seq EWMA of acceptance, starts at 1.0 (warm)
+    std::vector<int32_t> n_last_draft; // per-seq tokens drafted last step, 0 if skipped
+    std::vector<int32_t> steps_cold;   // per-seq skipped steps since the last probe
+    std::vector<int32_t> probe_gap;    // per-seq probe interval, doubles on a failed probe
+
     common_params_speculative_draft params; // reuses the draft-model params slot (ctx_tgt/ctx_dft)
 
     llama_batch batch;
@@ -1356,6 +1411,19 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
     std::vector<int>                i_last;
     std::vector<std::vector<float>> chain_h;
+
+    // catch-up rows stashed while a sequence is backed off, replayed in one decode when it is
+    // about to draft again: per-token catch-up decodes are pure overhead if no draft reads them
+    struct cold_row { llama_token id; llama_pos pos; };
+    std::vector<std::vector<cold_row>> cold_rows;
+    std::vector<std::vector<float>>    cold_h;
+
+    static constexpr size_t cold_max = 128;
+
+    bool  cold_defer = true;
+    float acc_min    = 0.60f;
+    int   probe_base = 8;
+    int   probe_cap  = 24;
 
     common_speculative_impl_draft_mtp(const common_params_speculative & params, uint32_t n_seq)
         : common_speculative_impl(COMMON_SPECULATIVE_TYPE_DRAFT_MTP, n_seq, params.draft.n_max)
@@ -1414,7 +1482,13 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
 
-        is_mem_shared = llama_get_ctx_other(ctx_dft) == ctx_tgt;
+        char arch[64] = {0};
+        llama_model_meta_val_str(llama_get_model(ctx_dft), "general.architecture", arch, sizeof(arch));
+        if (std::strcmp(arch, "qwen4exp") == 0 && getenv("TOSH_QWEN4EXP_MTP_EXPERIMENTAL") == nullptr) {
+            throw std::runtime_error("QWEN4EXP MTP is experimental and disabled by default; "
+                                     "set TOSH_QWEN4EXP_MTP_EXPERIMENTAL=1 to test it");
+        }
+        is_mem_shared = llama_get_ctx_other(ctx_dft) == ctx_tgt && std::strcmp(arch, "gemma4-assistant") == 0;
         chain_heads   = n_mtp_layers > 1 && !is_mem_shared;
 
         if (chain_heads) {
@@ -1428,6 +1502,16 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         this->n_max = this->params.n_max;
 
         pending_h.assign(n_seq, std::vector<float>(n_embd, 0.0f));
+
+        cold_rows.assign(n_seq, {});
+        cold_h.assign(n_seq, {});
+
+        cold_defer = getenv("TOSH_MTP_COLD_DEFER_DISABLE") == nullptr;
+        // 0.65 sat above the acceptance real content reaches, so it backed off where drafting
+        // still paid; 0.60 keeps the win and still catches the unpredictable case.
+        acc_min    = getenv("TOSH_MTP_ACC_MIN")   ? (float) atof(getenv("TOSH_MTP_ACC_MIN"))   : acc_min;
+        probe_base = getenv("TOSH_MTP_PROBE")     ?         atoi(getenv("TOSH_MTP_PROBE"))     : probe_base;
+        probe_cap  = getenv("TOSH_MTP_PROBE_CAP") ?         atoi(getenv("TOSH_MTP_PROBE_CAP")) : probe_cap;
 
         i_last.assign(n_seq, -1);
         i_batch_beg.assign(n_seq, -1);
@@ -1457,11 +1541,67 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         llama_batch_free(batch);
     }
 
+    // true if draft() will skip this seq, i.e. nothing will read its draft KV this step. mirrors
+    // the backoff gate exactly, and process() runs before draft() without touching that state
+    bool cold_step(llama_seq_id seq_id) const {
+        if (!cold_defer || (int) acc_ewma.size() != (int) n_seq) {
+            return false;
+        }
+
+        // a batch that verifies a draft can have its tail rejected and resent, so its rows must
+        // reach the KV now: only a plain single-token append is safe to hold back
+        if (n_last_draft[seq_id] != 0 || i_batch_end[seq_id] != i_batch_beg[seq_id]) {
+            return false;
+        }
+
+        return acc_ewma[seq_id] < acc_min && steps_cold[seq_id] < probe_gap[seq_id];
+    }
+
+    bool cold_flush(llama_seq_id seq_id) {
+        if (cold_rows[seq_id].empty()) {
+            return true;
+        }
+
+        auto * ctx_dft = this->params.ctx_dft;
+
+        // a context shift or a checkpoint restore moves the draft KV under the stash; replaying it
+        // then would write at the wrong offset, so drop it and let the next catch-up decode resync
+        const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id);
+
+        bool ok = cold_rows[seq_id][0].pos == pos_max + 1;
+        if (ok) {
+            common_batch_clear(batch);
+            for (size_t i = 0; i < cold_rows[seq_id].size(); ++i) {
+                common_batch_add(batch, cold_rows[seq_id][i].id, cold_rows[seq_id][i].pos, { seq_id }, 0);
+                std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd,
+                        cold_h[seq_id].data() + (size_t) i * n_embd, (size_t) n_embd * sizeof(float));
+            }
+
+            const int32_t rc = llama_decode(ctx_dft, batch);
+            if (rc != 0) {
+                SPC_ERR("llama_decode(ctx_dft) cold flush failed rc=%d (seq_id=%d, n=%d)\n",
+                        (int) rc, (int) seq_id, (int) cold_rows[seq_id].size());
+                ok = false;
+            }
+        } else {
+            SPC_WRN("draft KV moved under the cold stash (seq_id=%d, pos_max=%d, stash pos=%d), dropping it\n",
+                    (int) seq_id, (int) pos_max, (int) cold_rows[seq_id][0].pos);
+        }
+
+        cold_rows[seq_id].clear();
+        cold_h[seq_id].clear();
+
+        return ok;
+    }
+
     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
         const int32_t N = (int32_t) prompt.size();
         if (N <= 0) {
             return;
         }
+
+        cold_rows[seq_id].clear();
+        cold_h[seq_id].clear();
 
         auto * ctx_dft = this->params.ctx_dft;
         const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id);
@@ -1509,6 +1649,18 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         const size_t row_bytes = (size_t) n_embd * sizeof(float);
 
+        const bool can_defer = !is_mem_shared && !chain_heads;
+
+        // flush before the batch is built: cold_flush reuses `batch`
+        if (!is_mem_shared && !chain_heads) {
+            for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+                const bool keep = can_defer && cold_step(seq_id) && cold_rows[seq_id].size() < cold_max;
+                if (!cold_rows[seq_id].empty() && !keep) {
+                    cold_flush(seq_id);
+                }
+            }
+        }
+
         // if kv is shared with target (e.g Gemma4), then we can skip this catch-up decode
         if (!is_mem_shared) {
             common_batch_clear(batch);
@@ -1542,6 +1694,38 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
             auto * mem_dft = llama_get_memory(ctx_dft);
 
+            // stash the rows of backed-off sequences instead of decoding them
+            if (can_defer) {
+                static const size_t cold_max = 128;
+
+                int w = 0;
+                for (int k = 0; k < batch.n_tokens; ++k) {
+                    const llama_seq_id seq_id = batch.seq_id[k][0];
+
+                    if (cold_step(seq_id) && cold_rows[seq_id].size() < cold_max) {
+                        cold_rows[seq_id].push_back({ batch.token[k], batch.pos[k] });
+                        cold_h[seq_id].insert(cold_h[seq_id].end(),
+                                batch.embd + (size_t) k * n_embd, batch.embd + (size_t) (k + 1) * n_embd);
+                        continue;
+                    }
+
+                    if (w != k) {
+                        batch.token    [w]    = batch.token[k];
+                        batch.pos      [w]    = batch.pos[k];
+                        batch.n_seq_id [w]    = batch.n_seq_id[k];
+                        batch.seq_id   [w][0] = batch.seq_id[k][0];
+                        batch.logits   [w]    = batch.logits[k];
+                        std::memcpy(batch.embd + (size_t) w * n_embd, batch.embd + (size_t) k * n_embd, row_bytes);
+                    }
+                    w++;
+                }
+                batch.n_tokens = w;
+
+                if (batch.n_tokens == 0) {
+                    return finish_process(batch_in, row_bytes);
+                }
+            }
+
             bool ok = true;
             for (int head = 0; head < n_mtp_layers; ++head) {
                 if (chain_heads) {
@@ -1572,6 +1756,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             }
         }
 
+        return finish_process(batch_in, row_bytes);
+    }
+
+    bool finish_process(const llama_batch & batch_in, size_t row_bytes) {
+        GGML_UNUSED(batch_in);
+
+        auto * ctx_tgt = this->params.ctx_tgt;
+
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             if (i_batch_end[seq_id] < 0) {
                 continue;
@@ -1601,8 +1793,18 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         // keep track of which sequences are still drafting
         int n_drafting = 0;
         std::vector<bool> drafting(n_seq);
+        // "drafting" is cleared inside the loop when a seq drops out (p_min/n_max), so it can't
+        // report which seqs drafted; this latches that for the acceptance-backoff bookkeeping
+        std::vector<bool> drafted_this_step(n_seq, false);
 
         const size_t row_bytes = (size_t) n_embd * sizeof(float);
+
+        if ((int) acc_ewma.size() != (int) n_seq) {
+            acc_ewma.assign(n_seq, 1.0f);
+            n_last_draft.assign(n_seq, 0);
+            steps_cold.assign(n_seq, 0);
+            probe_gap.assign(n_seq, probe_base);
+        }
 
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             auto & dp = dparams[seq_id];
@@ -1611,8 +1813,24 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 continue;
             }
 
+            // while backed off, probe every probe_gap steps and double the gap on a failed probe,
+            // so a durable cold streak decays toward AR yet a late recovery is still caught
+            if (acc_ewma[seq_id] < acc_min) {
+                if (steps_cold[seq_id] < probe_gap[seq_id]) {
+                    n_last_draft[seq_id] = 0;
+                    steps_cold[seq_id]++;
+                    continue;
+                }
+                steps_cold[seq_id] = 0;
+                probe_gap[seq_id] = std::min(probe_gap[seq_id] * 2, probe_cap);
+            } else {
+                steps_cold[seq_id] = 0;
+                probe_gap[seq_id] = probe_base;
+            }
+
             n_drafting++;
             drafting[seq_id] = true;
+            drafted_this_step[seq_id] = true;
             common_sampler_reset(smpls[seq_id].get());
 
             common_batch_add(batch, dp.id_last, dp.n_past, { seq_id }, true);
@@ -1741,12 +1959,23 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             if (dp.result->size() < (size_t) params.n_min) {
                 dp.result->clear();
             }
+            if (drafted_this_step[seq_id]) {
+                n_last_draft[seq_id] = (int32_t) dp.result->size();
+            }
         }
     }
 
     void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
             return;
+        }
+
+        if ((int) acc_ewma.size() == (int) n_seq && n_last_draft[seq_id] > 0) {
+            static const float alpha = getenv("TOSH_MTP_EWMA") ? (float) atof(getenv("TOSH_MTP_EWMA")) : 0.5f;
+            const float acc = std::min(1.0f, (float) n_accepted / (float) n_last_draft[seq_id]);
+            const float a = acc > acc_ewma[seq_id] ? 0.2f : alpha;  // rise fast, fall at alpha
+            acc_ewma[seq_id] = a * acc_ewma[seq_id] + (1.0f - a) * acc;
+            n_last_draft[seq_id] = 0;
         }
 
         const int32_t n_rows = verify_h_rows[seq_id];
