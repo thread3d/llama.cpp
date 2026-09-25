@@ -6,7 +6,6 @@
 #import "ggml-metal-impl.h"
 #import "ggml-metal-common.h"
 #import "ggml-metal-ops.h"
-#import "ggml-metal-fusion.h"
 
 #ifdef TOSH_ENABLE_DYNAMIC_MOE
 #include "tosh-moe.h"
@@ -266,7 +265,6 @@ struct ggml_metal {
 #endif
 
     ggml_metal_event_t ev_cpy; // for async copies
-    ggml_metal_event_t ev_sync; // destination completion signal
 
     id<MTLCounterSampleBuffer> ct_buf;   // trace only, TOSH_MGPU_CTIME
     id<MTLSharedEvent>         ev_wait_dummy;   // benchmark only, TOSH_MGPU_WAIT_SATISFIED
@@ -310,12 +308,15 @@ struct ggml_metal {
     // additional, inference-time compiled pipelines
     ggml_metal_pipelines_t pipelines_ext;
 
+    bool use_fusion;
     bool use_concurrency;
     bool use_graph_optimize;
 
     int debug_graph;
+    int debug_fusion;
 
-    struct ggml_metal_fusion_info * finfo;
+    // how many times a given op was fused
+    uint64_t fuse_cnt[GGML_OP_COUNT];
 
     // capture state
     int capture_compute;
@@ -1009,8 +1010,7 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
             }
         }
 
-        res->ev_cpy  = ggml_metal_device_event_init(dev);
-        res->ev_sync = ggml_metal_device_event_init(dev);
+        res->ev_cpy = ggml_metal_device_event_init(dev);
 
         const struct ggml_metal_device_props * props_dev = ggml_metal_device_get_props(dev);
 
@@ -1018,6 +1018,7 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
 
         res->d_queue = dispatch_queue_create("ggml-metal", DISPATCH_QUEUE_CONCURRENT);
 
+        res->use_fusion      = getenv("GGML_METAL_FUSION_DISABLE") == nil;
         // discrete GPUs (AMD) corrupt their output with a concurrent encoder: the driver does
         // not honour the memory barrier. GGML_METAL_CONCURRENCY_ENABLE forces it back on to test.
         res->use_concurrency = props_dev->has_unified_memory
@@ -1029,19 +1030,20 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
             res->debug_graph = val ? atoi(val) : 0;
         }
 
+        {
+            const char * val = getenv("GGML_METAL_FUSION_DEBUG");
+            res->debug_fusion = val ? atoi(val) : 0;
+        }
+
         res->use_graph_optimize = true;
 
         if (getenv("GGML_METAL_GRAPH_OPTIMIZE_DISABLE") != NULL) {
             res->use_graph_optimize = false;
         }
 
-        res->finfo = ggml_metal_device_get_fusion_info(dev);
-        if (ggml_metal_fusion_info_stats(res->finfo)) {
-            ggml_metal_fusion_info_labels_init(res->finfo);
-            res->n_cb = 0;
-        }
+        memset(res->fuse_cnt, 0, sizeof(res->fuse_cnt));
 
-        GGML_LOG_INFO("%s: use fusion         = %s\n", __func__, ggml_metal_fusion_info_enabled(res->finfo) ? "true" : "false");
+        GGML_LOG_INFO("%s: use fusion         = %s\n", __func__, res->use_fusion         ? "true" : "false");
         GGML_LOG_INFO("%s: use concurrency    = %s\n", __func__, res->use_concurrency    ? "true" : "false");
         GGML_LOG_INFO("%s: use graph optimize = %s\n", __func__, res->use_graph_optimize ? "true" : "false");
 
@@ -1151,18 +1153,15 @@ void ggml_metal_free(ggml_metal_t ctx) {
         ctx->pipelines_ext = nil;
     }
 
-    if (ggml_metal_fusion_info_debug(ctx->finfo) > 0) {
+    if (ctx->debug_fusion > 0) {
         GGML_LOG_DEBUG("%s: fusion stats:\n", __func__);
-
-        const int n_fusions = ggml_metal_fusion_info_n_fusions(ctx->finfo);
-        for (int i = 0; i < n_fusions; i++) {
-            const uint64_t count = ggml_metal_fusion_info_count(ctx->finfo, i);
-            if (count == 0) {
+        for (int i = 0; i < GGML_OP_COUNT; i++) {
+            if (ctx->fuse_cnt[i] == 0) {
                 continue;
             }
 
             // note: cannot use ggml_log here
-            GGML_LOG_DEBUG("%s: - %s: %" PRIu64 "\n", __func__, ggml_metal_fusion_info_label(ctx->finfo, i), count);
+            GGML_LOG_DEBUG("%s: - %s: %" PRIu64 "\n", __func__, ggml_op_name((enum ggml_op) i), ctx->fuse_cnt[i]);
         }
     }
 
@@ -1173,7 +1172,6 @@ void ggml_metal_free(ggml_metal_t ctx) {
     dispatch_release(ctx->d_queue);
 
     ggml_metal_device_event_free(ctx->dev, ctx->ev_cpy);
-    ggml_metal_device_event_free(ctx->dev, ctx->ev_sync);
 
     free(ctx);
 }
@@ -1948,18 +1946,6 @@ bool ggml_metal_cpy_tensor_async_ex(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, 
         if (bid_src.metal == nil || bid_dst.metal == nil) {
             return false;
         }
-
-        id<MTLCommandQueue> dst_queue = ggml_metal_device_get_queue(ctx_dst->dev);
-        id<MTLCommandBuffer> sync_cmd_buf = [dst_queue commandBuffer];
-
-        ggml_metal_event_encode_signal(ctx_dst->ev_sync, sync_cmd_buf);
-
-        [sync_cmd_buf commit];
-
-        [ctx_dst->cmd_bufs_ext addObject:sync_cmd_buf];
-        ctx_dst->cmd_buf_last = sync_cmd_buf;
-
-        [sync_cmd_buf retain];
 
         // queue the copy operation into the Metal context
         // this will be queued at the end, after any currently ongoing GPU operations
@@ -3436,8 +3422,8 @@ static bool ggml_metal_moe_encode_range(
     }
 
     ggml_metal_op_t ctx_op = ggml_metal_op_init(
-        ctx->dev, (ggml_metal_cmd_buf_t) cmd_buf, gf, ctx->finfo, start, end,
-        false, false, ctx->debug_graph);
+        ctx->dev, (ggml_metal_cmd_buf_t) cmd_buf, gf, start, end,
+        ctx->use_fusion, false, false, ctx->debug_graph, ctx->debug_fusion);
 
     for (int idx = 0; idx < ggml_metal_op_n_nodes(ctx_op); ++idx) {
         const int res = ggml_metal_op_encode(ctx_op, idx);
@@ -4095,10 +4081,6 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
         return GGML_STATUS_FAILED;
     }
 
-    if (gf->n_nodes == 0) {
-        return GGML_STATUS_SUCCESS;
-    }
-
 #ifdef TOSH_ENABLE_DYNAMIC_MOE
     bool staged_moe = false;
     const char * bounded_env = getenv("TOSH_MOE_BOUNDED_STAGE");
@@ -4201,17 +4183,10 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
     @autoreleasepool {
         ctx->gf = gf;
 
-        if (ctx->n_cb == 0) {
-            // single-threaded encoding: the whole graph is encoded by one command buffer
-            ctx->n_nodes_0      = gf->n_nodes;
-            ctx->n_nodes_1      = 0;
-            ctx->n_nodes_per_cb = 0;
-        } else {
-            ctx->n_nodes_0      = MIN(n_main, gf->n_nodes);
-            ctx->n_nodes_1      = gf->n_nodes - ctx->n_nodes_0;
+        ctx->n_nodes_0 = MIN(n_main, gf->n_nodes);
+        ctx->n_nodes_1 = gf->n_nodes - ctx->n_nodes_0;
 
-            ctx->n_nodes_per_cb = (ctx->n_nodes_1 + ctx->n_cb - 1) / ctx->n_cb;
-        }
+        ctx->n_nodes_per_cb = (ctx->n_nodes_1 + ctx->n_cb - 1) / ctx->n_cb;
 
         if (ctx->capture_compute >= 0) {
             ctx->capture_compute--;
@@ -4219,6 +4194,8 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
 
         const bool use_capture = ctx->capture_compute == 0;
         if (use_capture) {
+            ctx->capture_compute = -1;
+
             // make sure all previous computations have finished before starting the capture
             if (ctx->cmd_buf_last) {
                 [ctx->cmd_buf_last waitUntilCompleted];
@@ -4241,7 +4218,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
 
                 NSError * error = nil;
                 if (![[MTLCaptureManager sharedCaptureManager] startCaptureWithDescriptor:descriptor error:&error]) {
-                    GGML_LOG_ERROR("%s: error: unable to start capture '%s' (did you set METAL_CAPTURE_ENABLED=1 ?)\n", __func__, [[error localizedDescription] UTF8String]);
+                    GGML_LOG_ERROR("%s: error: unable to start capture '%s'\n", __func__, [[error localizedDescription] UTF8String]);
                 } else {
                     [ctx->capture_scope beginScope];
                     ctx->capture_started = true;
@@ -4493,12 +4470,6 @@ ggml_metal_event_t ggml_metal_get_ev_cpy(ggml_metal_t ctx) {
 }
 
 void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
-    // when fusion stats are collected the graph must be encoded by a single thread so the
-    // counters are race-free; override whatever the caller requested
-    if (ggml_metal_fusion_info_stats(ctx->finfo)) {
-        n_cb = 0;
-    }
-
     if (ctx->n_cb != n_cb) {
         ctx->n_cb = MIN(n_cb, GGML_METAL_MAX_COMMAND_BUFFERS);
 
@@ -4534,12 +4505,13 @@ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
             ctx->dev,
             cmd_buf,
             ctx->gf,
-            ctx->finfo,
             idx_start,
             idx_end,
+            ctx->use_fusion,
             ctx->use_concurrency,
-            ctx->capture_compute == 0,
-            ctx->debug_graph);
+            ctx->capture_compute,
+            ctx->debug_graph,
+            ctx->debug_fusion);
 
         const bool cbp_on = tosh_cbp_on();
         const uint64_t cbp_t0 = cbp_on ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
