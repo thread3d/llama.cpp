@@ -111,6 +111,31 @@ GGML_CUDA_P2P=1 llama-cli -m model.gguf -sm tensor
 
 P2P requires driver support (usually restricted to workstation/datacenter GPUs) and **may cause crashes or corrupted outputs on some motherboards or BIOS configurations** (e.g. when IOMMU is enabled). If you see instability after enabling it, unset the variable.
 
+### 7. Metal on macOS
+
+The Metal backend normally registers only the system-default GPU, so `--device` and the
+multi-GPU split modes have nothing to choose from. This branch (see
+[build-macos-amd.md](build-macos-amd.md)) adds explicit selection:
+
+```bash
+# one chosen GPU
+GGML_METAL_DEVICE_INDEX=1 llama-cli -m model.gguf -ngl 99
+
+# several GPUs, by their probed indices
+GGML_METAL_DEVICE_LIST=0,1,2 TOSH_MGPU_EVENTS=1 llama-cli -m model.gguf -ngl 99 -sm layer
+```
+
+On AMD cards also set `TOSH_FA_AMD=1`. Probe the indices before using them - they change
+across reboots, and `--list-devices` reports only the default device:
+
+```bash
+GGML_METAL_DEVICE_LIST=0,1,2 llama-bench -m small.gguf -p 0 -n 1 -ngl 99 -r 1 2>&1 >/dev/null | grep 'device '
+```
+
+Cards that share a board have a faster link between them than to a separate card, so a
+same-board pair scales better than a pair spanning two cards. Keep `-ncmoe` in mind for
+MoE models that do not fit in the combined VRAM.
+
 ---
 
 ## Troubleshooting

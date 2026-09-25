@@ -153,3 +153,6 @@ a.out.*
 
 AGENTS.local.md
 .pi/SYSTEM.md
+
+# macOS/AMD benchmark sweep artifacts (raw per-cell JSON; the TSV is committed)
+/bench-macos-amd-raw/

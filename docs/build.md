@@ -144,6 +144,18 @@ To disable the Metal build at compile time use the `-DGGML_METAL=OFF` cmake opti
 
 When built with Metal support, you can explicitly disable GPU inference with the `--n-gpu-layers 0` command-line argument.
 
+### Intel Macs with AMD GPUs
+
+Upstream's Metal kernels are written for Apple Silicon. On Intel Macs with discrete
+AMD GPUs they fall back to slow paths (matrix-vector prefill, attention on the CPU),
+which makes the GPU slower than the CPU. This branch carries dedicated AMD kernels and
+the build needs two extra steps: set `TOSH_FA_AMD=1` at runtime, and select GPUs with
+`GGML_METAL_DEVICE_INDEX` / `GGML_METAL_DEVICE_LIST` because Metal otherwise uses only
+the system-default card.
+
+See [build-macos-amd.md](build-macos-amd.md) for the build command, the environment
+variables, `n_cpu_moe` guidance for models larger than VRAM, and measured results.
+
 ## SYCL
 
 SYCL is a higher-level programming model to improve programming productivity on various hardware accelerators.
