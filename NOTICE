@@ -1,0 +1,67 @@
+NOTICE
+======
+
+This repository is a fork of llama.cpp (<https://github.com/ggml-org/llama.cpp>),
+based on upstream commit 1ab7e5ad2.
+
+Upstream work
+-------------
+
+llama.cpp and ggml: Copyright (c) 2023-2026 The ggml authors.
+Licensed under the MIT License. See LICENSE.
+
+AMD GPU support (this fork)
+---------------------------
+
+The Metal backend for AMD GPUs on Intel Macs in this fork is ported from ToshLLM
+(<https://github.com/engeldlgado/toshllm>):
+
+    Copyright (C) 2026 Engelbert Delgado <engeldlgado@gmail.com>
+    SPDX-License-Identifier: GPL-3.0-or-later
+
+The changes that port makes, and the code it adds, cover 111 paths on top of upstream
+1ab7e5ad2, including:
+
+    ggml/     AMD Metal kernels (ToshGEMM, AMD attention, wave64 path), Metal
+              device selection and multi-GPU collectives, CPU-side support
+              (57 paths)
+    src/      model and context hooks the AMD path needs (26 paths)
+    tosh-moe/ optional bounded-VRAM MoE expert cache (4 paths)
+    common/, tests/, tools/, include/, cmake/, CMakeLists.txt
+    docs/, README.md, scripts/, bench-macos-amd.tsv
+
+The complete list is `git diff --name-only 1ab7e5ad2 <revision>`.
+
+Licensing of this repository as a whole
+---------------------------------------
+
+Because it combines MIT-licensed llama.cpp with the GPL-3.0-or-later AMD work, this
+repository as a whole is distributed under the GNU General Public License, version 3
+or later. The full text is in LICENSE-GPL-3.0.txt.
+
+The upstream MIT notices are retained and continue to apply to the files they cover.
+The MIT License is compatible with the GPL in this direction.
+
+Redistribution
+--------------
+
+If you redistribute this repository, or a build of it, GPL-3.0 sections 4 and 5 require
+that you:
+
+  - publish the complete corresponding source under GPL-3.0-or-later,
+  - keep these copyright and licence notices intact,
+  - state that you changed the files, and when.
+
+If you need an MIT-only tree, use upstream llama.cpp without the AMD patch series. It
+will not have AMD GPU acceleration.
+
+Changes and dates
+-----------------
+
+The AMD work was integrated in September 2026 on top of upstream 1ab7e5ad2, in these
+commits:
+
+    02c856029  ToshLLM AMD Metal patch series 0001-0080 at upstream 465e49b9c
+    0f964897b  merge upstream 1ab7e5ad2 into the series
+    ec72da5a7  use the ToshLLM Metal backend verbatim instead of merging it
+    f590c66fb  documentation and the benchmark sweep

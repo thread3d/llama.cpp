@@ -19,10 +19,10 @@
 
 ## macOS with AMD GPUs
 
-This branch adds a working Metal backend for **Intel Macs with discrete AMD GPUs** -
+This fork adds a working Metal backend for **Intel Macs with discrete AMD GPUs** -
 Mac Pro 2019, iMac Pro, 2019 MacBook Pro, and Thunderbolt eGPUs. Upstream's Metal
 kernels target Apple Silicon, so on those cards prefill falls back to the
-matrix-vector path and attention runs on the CPU. With the AMD kernels in this branch
+matrix-vector path and attention runs on the CPU. With the AMD kernels in this fork
 a 1B model goes from roughly **5 t/s prefill / 3 t/s generation** to **thousands of
 tokens a second** on a Radeon PRO W6800X Duo.
 
@@ -32,8 +32,10 @@ tokens a second** on a Radeon PRO W6800X Duo.
 
 > **Licensing:** the AMD Metal kernels are ported from
 > [ToshLLM](https://github.com/engeldlgado/toshllm) and are licensed
-> **GPL-3.0-or-later**, Copyright (C) 2026 Engelbert Delgado. This branch is therefore
-> a derivative work and must be redistributed under that licence, not MIT. See
+> **GPL-3.0-or-later**, Copyright (C) 2026 Engelbert Delgado. This repository therefore
+> combines MIT-licensed llama.cpp with GPL-3.0-or-later code and is distributed as a
+> whole under the GNU General Public License, version 3 or later - see [NOTICE](NOTICE)
+> and [LICENSE-GPL-3.0.txt](LICENSE-GPL-3.0.txt). Details in
 > [Licensing and provenance](docs/build-macos-amd.md#licensing-and-provenance).
 
 ## Quick start
