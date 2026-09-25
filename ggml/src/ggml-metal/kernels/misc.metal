@@ -375,10 +375,10 @@ template [[host_name("kernel_snake_f16")]]  kernel void kernel_snake<half>(const
 template [[host_name("kernel_snake_bf16")]] kernel void kernel_snake<bfloat>(constant ggml_metal_kargs_snake &, device const bfloat *, device const float *, device const float *, device bfloat *, uint, uint, uint);
 #endif
 
-template<int N, int NW = N_SIMDWIDTH>
+template<int N, int NW = N_SIMDWIDTH, typename src_t = float>
 kernel void kernel_fwht_f32(
         constant ggml_metal_kargs_fwht & args,
-        device const float * src,
+        device const src_t * src,
         device float * dst,
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort sgitg[[simdgroup_index_in_threadgroup]],
@@ -402,13 +402,13 @@ kernel void kernel_fwht_f32(
 
     float reg[NE];
     for (int i = 0; i < NE; i++) {
-        reg[i] = src[i*NW + lane]*scale;
+        reg[i] = float(src[i*NW + lane])*scale;
     }
     for (int i = 1; i < NW; i *= 2) {
         for (int j = 0; j < NE; j++) {
             const float val = reg[j];
             const float val2 = simd_shuffle_xor(val, i);
-            reg[j] = (lane & i) == 0 ? val2 + val : val2 - val;
+            reg[j] = val2 - val + 2*((lane & i) == 0)*val;
         }
     }
 
@@ -430,6 +430,8 @@ kernel void kernel_fwht_f32(
 }
 
 typedef decltype(kernel_fwht_f32<64>) kernel_fwht_t;
+typedef decltype(kernel_fwht_f32<64, N_SIMDWIDTH, float>) kernel_fwht_f32_t;
+typedef decltype(kernel_fwht_f32<64, N_SIMDWIDTH, half>)  kernel_fwht_f16_t;
 
 // head regrouping [hd, nk, rep] -> [hd, rep, nk] read by the fused FWHT, fixed per model
 constant short FC_fwht_hd  [[function_constant(FC_FWHT + 0)]];
@@ -660,6 +662,13 @@ template [[host_name("kernel_fwht_f32_256")]] kernel kernel_fwht_t kernel_fwht_f
 template [[host_name("kernel_fwht_f32_512")]] kernel kernel_fwht_t kernel_fwht_f32<512>;
 template [[host_name("kernel_fwht_f32_1024")]] kernel kernel_fwht_t kernel_fwht_f32<1024>;
 
+template [[host_name("kernel_fwht_f16_64")]]  kernel kernel_fwht_f16_t kernel_fwht_f32<64,  N_SIMDWIDTH, half>;
+template [[host_name("kernel_fwht_f16_128")]] kernel kernel_fwht_f16_t kernel_fwht_f32<128, N_SIMDWIDTH, half>;
+template [[host_name("kernel_fwht_f16_256")]] kernel kernel_fwht_f16_t kernel_fwht_f32<256, N_SIMDWIDTH, half>;
+template [[host_name("kernel_fwht_f16_512")]] kernel kernel_fwht_f16_t kernel_fwht_f32<512, N_SIMDWIDTH, half>;
+
+constant int FC_dsv4_hc_n_hc [[function_constant(FC_DSV4_HC + 0)]];
+
 kernel void kernel_dsv4_hc_comb_f32(
         constant ggml_metal_kargs_dsv4_hc_comb & args,
         device const char * mixes,
@@ -730,20 +739,8 @@ kernel void kernel_dsv4_hc_pre_f32(
         ushort  tiisg[[thread_index_in_simdgroup]],
         ushort  sgitg[[simdgroup_index_in_threadgroup]],
         ushort3   ntg[[threads_per_threadgroup]]) {
-    constexpr ushort hc = 4;
-
     const int it = tgpig.y;
     const int i0 = ((int) tgpig.x*ntg.y + sgitg)*32 + tiisg;
-
-    float weight_lane = 0.0f;
-    if (tiisg < hc) {
-        weight_lane = *(device const float *) (weights + tiisg*args.nb_w0 + it*args.nb_w1);
-    }
-
-    float w[hc];
-    FOR_UNROLL (ushort ih = 0; ih < hc; ++ih) {
-        w[ih] = simd_shuffle(weight_lane, ih);
-    }
 
     if (i0 >= args.n_embd) {
         return;
@@ -751,11 +748,78 @@ kernel void kernel_dsv4_hc_pre_f32(
 
     device const char * xb = x + i0*args.nb_x0 + it*args.nb_x2;
     float result = 0.0f;
-    FOR_UNROLL (ushort ih = 0; ih < hc; ++ih) {
-        result = fma(*(device const float *) (xb + ih*args.nb_x1), w[ih], result);
+    FOR_UNROLL (int ih = 0; ih < FC_dsv4_hc_n_hc; ++ih) {
+        const float xv = *(device const float *) (xb + ih*args.nb_x1);
+        const float wv = *(device const float *) (weights + ih*args.nb_w0 + it*args.nb_w1);
+        result = fma(xv, wv, result);
     }
 
-    *(device float *) (dst + i0*args.nb_d0 + it*args.nb_d1) = result;
+    *(device float *) (dst + i0*args.nb_d0 + it*args.nb_d1) = args.scale*result;
+}
+
+kernel void kernel_dsv4_hc_pre_gated_f32(
+        constant ggml_metal_kargs_dsv4_hc_pre & args,
+        device const char * x,
+        device const char * gate,
+        device       char * dst,
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        ushort  tiisg[[thread_index_in_simdgroup]],
+        ushort  sgitg[[simdgroup_index_in_threadgroup]],
+        ushort3   ntg[[threads_per_threadgroup]]) {
+    const int it = tgpig.y;
+    const int i0 = ((int) tgpig.x*ntg.y + sgitg)*32 + tiisg;
+
+    if (i0 >= args.n_embd) {
+        return;
+    }
+
+    device const char * xb = x    + i0*args.nb_x0 + it*args.nb_x2;
+    device const char * gb = gate + i0*args.nb_w0 + it*args.nb_w2;
+    float result = 0.0f;
+    FOR_UNROLL (int ih = 0; ih < FC_dsv4_hc_n_hc; ++ih) {
+        const float g  = 1.0f/(1.0f + exp(-*(device const float *) (gb + ih*args.nb_w1)));
+        const float xv = *(device const float *) (xb + ih*args.nb_x1);
+        result = fma(xv, g, result);
+    }
+
+    *(device float *) (dst + i0*args.nb_d0 + it*args.nb_d1) = args.scale*result;
+}
+
+kernel void kernel_dsv4_hc_post_nocomb_f32(
+        constant ggml_metal_kargs_dsv4_hc_post & args,
+        device const char * x,
+        device const char * residual,
+        device const char * post,
+        device       char * dst,
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        ushort  tiisg[[thread_index_in_simdgroup]],
+        ushort  sgitg[[simdgroup_index_in_threadgroup]],
+        ushort3   ntg[[threads_per_threadgroup]]) {
+    constexpr ushort hc = 4;
+
+    const int it = tgpig.y;
+    const int i0 = ((int) tgpig.x*ntg.y + sgitg)*32 + tiisg;
+
+    float post_lane = 0.0f;
+    if (tiisg < hc) {
+        post_lane = *(device const float *) (post + tiisg*args.nb_p0 + it*args.nb_p1);
+    }
+
+    float post_reg[hc];
+    FOR_UNROLL (ushort idst = 0; idst < hc; ++idst) {
+        post_reg[idst] = simd_shuffle(post_lane, idst);
+    }
+
+    if (i0 >= args.n_embd) {
+        return;
+    }
+
+    const float xv = *(device const float *) (x + i0*args.nb_x0 + it*args.nb_x1);
+    device const char * rb = residual + i0*args.nb_r0 + it*args.nb_r2;
+    FOR_UNROLL (ushort idst = 0; idst < hc; ++idst) {
+        const float rv = *(device const float *) (rb + idst*args.nb_r1);
+        *(device float *) (dst + i0*args.nb_d0 + idst*args.nb_d1 + it*args.nb_d2) = xv*post_reg[idst] + rv;
+    }
 }
 
 kernel void kernel_dsv4_hc_post_f32(
