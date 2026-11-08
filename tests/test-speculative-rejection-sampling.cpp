@@ -4,6 +4,7 @@
 #include "arg.h"
 #include "log.h"
 
+#include <clocale>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
