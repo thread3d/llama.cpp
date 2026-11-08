@@ -153,8 +153,14 @@ Any other BLAS library can be used by setting the `GGML_BLAS_VENDOR` option. See
 
 ## Metal Build
 
-On MacOS, Metal is enabled by default. Using Metal makes the computation run on the GPU.
+On macOS 13 and newer, Metal is enabled by default. Using Metal makes the computation run on the GPU.
 To disable the Metal build at compile time use the `-DGGML_METAL=OFF` cmake option.
+
+The Metal backend relies on Metal 3 era APIs, so it is not enabled by default when building on an
+older macOS (Darwin < 22, i.e. macOS 12 and earlier): such builds use the CPU backend instead. The
+backend still compiles there, but it aborts at the first graph compute when it waits on a shared
+event, because `-[MTLSharedEvent waitUntilSignaledValue:timeoutMS:]` is neither declared by older
+SDKs nor implemented by older runtimes. Pass `-DGGML_METAL=ON` to build it anyway.
 
 When built with Metal support, you can explicitly disable GPU inference with the `--n-gpu-layers 0` command-line argument.
 

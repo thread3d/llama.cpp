@@ -96,6 +96,17 @@ if (APPLE)
     set(GGML_METAL_DEFAULT ON)
     set(GGML_BLAS_DEFAULT ON)
     set(GGML_BLAS_VENDOR_DEFAULT "Apple")
+
+    # The Metal backend uses APIs from the Metal 3 era (macOS 13 / Darwin 22 and newer). For
+    # example ggml_metal_device_event_synchronize() waits with
+    # -[MTLSharedEvent waitUntilSignaledValue:timeoutMS:], which older SDKs do not declare (the
+    # call only produces a -Wobjc-method-access warning, so the build itself succeeds) and older
+    # runtimes do not implement (the first graph compute aborts with an unrecognized selector).
+    # Default to the CPU backend there; pass -DGGML_METAL=ON to build the Metal backend anyway.
+    if (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SYSTEM_VERSION VERSION_LESS "22.0")
+        set(GGML_METAL_DEFAULT OFF)
+        message(STATUS "Darwin ${CMAKE_SYSTEM_VERSION} is older than macOS 13 - Metal backend disabled by default")
+    endif()
 else()
     set(GGML_METAL_DEFAULT OFF)
     set(GGML_BLAS_DEFAULT OFF)
