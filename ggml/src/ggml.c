@@ -564,6 +564,27 @@ int64_t ggml_time_us(void) {
     QueryPerformanceCounter(&t);
     return (int64_t) (((double) (t.QuadPart - timer_start) / timer_freq) * 1000000);
 }
+#elif defined(__APPLE__) && !defined(CLOCK_MONOTONIC)
+// clock_gettime is only available since macOS 10.12
+#include <mach/mach_time.h>
+
+static int64_t ggml_time_ns(void) {
+    static mach_timebase_info_data_t info = {0, 0};
+    if (info.denom == 0) {
+        mach_timebase_info(&info);
+    }
+    const uint64_t t = mach_absolute_time();
+    return (int64_t) ((t / info.denom) * info.numer + (t % info.denom) * info.numer / info.denom);
+}
+
+void ggml_time_init(void) {}
+int64_t ggml_time_ms(void) {
+    return ggml_time_ns() / 1000000;
+}
+
+int64_t ggml_time_us(void) {
+    return ggml_time_ns() / 1000;
+}
 #else
 void ggml_time_init(void) {}
 int64_t ggml_time_ms(void) {
