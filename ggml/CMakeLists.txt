@@ -96,6 +96,14 @@ if (APPLE)
     set(GGML_METAL_DEFAULT ON)
     set(GGML_BLAS_DEFAULT ON)
     set(GGML_BLAS_VENDOR_DEFAULT "Apple")
+
+    # The Metal backend uses Metal 3 era APIs (macOS 13 / Darwin 22 and newer). Older SDKs do not
+    # declare them and older runtimes do not implement them, so the GPU path cannot run there.
+    # Default to the CPU backend; pass -DGGML_METAL=ON to build the Metal backend anyway.
+    if (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SYSTEM_VERSION VERSION_LESS "22.0")
+        set(GGML_METAL_DEFAULT OFF)
+        message(STATUS "Darwin ${CMAKE_SYSTEM_VERSION} is older than macOS 13 - Metal backend disabled by default")
+    endif()
 else()
     set(GGML_METAL_DEFAULT OFF)
     set(GGML_BLAS_DEFAULT OFF)
