@@ -2,15 +2,10 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 
-#include <time.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#if defined(_WIN32)
-#include <windows.h>
-#endif
 
 // failed checks; main exits non-zero on any failures
 static int n_failed = 0;
@@ -331,21 +326,11 @@ static void test_mul_mat_id(ggml_backend_t backend, int64_t K, int64_t R, int64_
 }
 
 static double time_graph_compute(ggml_backend_t backend, struct ggml_cgraph * gf) {
-#if defined(_WIN32)
-    // high-res timer; clock_gettime is not portable across Windows toolchains
-    LARGE_INTEGER freq, t0, t1;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t0);
+    ggml_time_init();
+    const int64_t t0 = ggml_time_us();
     ggml_backend_graph_compute(backend, gf);
-    QueryPerformanceCounter(&t1);
-    return (double) (t1.QuadPart - t0.QuadPart) / (double) freq.QuadPart;
-#else
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    ggml_backend_graph_compute(backend, gf);
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    return (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
-#endif
+    const int64_t t1 = ggml_time_us();
+    return (double) (t1 - t0) / 1e6;
 }
 
 // Warm up, then time n runs and return the best
