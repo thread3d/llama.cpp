@@ -82,6 +82,10 @@ Binaries land in `build-macpro31-cpu/bin`.
 
 ## Measured throughput
 
+This section covers the first sweep: models up to 1.5B and contexts up to 1024 tokens. A second
+sweep covering models up to 8B and contexts up to 4096 tokens is in
+[`build-macpro31-scale.md`](build-macpro31-scale.md).
+
 Every number below comes from `scripts/bench-macpro31.sh`, which is committed so the sweep can be
 repeated. The raw llama-bench records of each run are in `docs/macpro31/bench-context.jsonl` and
 `docs/macpro31/bench-quant.jsonl`; `scripts/plot-macpro31.py` turns them into the charts and
