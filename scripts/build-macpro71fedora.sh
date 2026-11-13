@@ -3,8 +3,9 @@
 # GPUs: 2x Radeon Pro W6800X in the MPX "Duo" module (gfx1030), 32 GiB each.
 # Only the duo is built for. The Radeon Pro Vega II (gfx906) is left out of the
 # device code, so keep it off the device list at run time as well:
-#   HIP_VISIBLE_DEVICES=0,1        (HIP/ROCm backend)
-#   GGML_VK_VISIBLE_DEVICES=0,1    (Vulkan backend)
+#   HIP_VISIBLE_DEVICES=0,1        (HIP/ROCm backend: the duo is 0,1)
+#   GGML_VK_VISIBLE_DEVICES=1,2    (Vulkan backend: the Vega II is 0)
+# The two backends order the cards differently; check --list-devices.
 #
 # Usage: scripts/build-macpro71fedora.sh [rocm|vulkan|both]
 
