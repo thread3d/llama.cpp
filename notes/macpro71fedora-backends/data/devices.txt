@@ -1,0 +1,23 @@
+# llama.cpp device enumeration, 2026-11-14T08:48:14+01:00
+# commit: 4b40b2a15
+
+## build-rocm
+Available devices:
+  ROCm0: AMD Radeon Graphics (32752 MiB, 32710 MiB free)
+  ROCm1: AMD Radeon Graphics (32752 MiB, 32710 MiB free)
+
+## build-vulkan (all devices, to show the numbering)
+ggml_vulkan: Found 3 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon Graphics (RADV VEGA20) (radv) | uma: 0 | rebar: 1 | fp16: dot2 | bf16: 0 | fp4: 0 | warp size: 64 | shared memory: 65536 | int dot: 1 | matrix cores: none
+ggml_vulkan: 1 = AMD Radeon Graphics (RADV NAVI21) (radv) | uma: 0 | rebar: 0 | fp16: dot2 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 65536 | int dot: 1 | matrix cores: none
+ggml_vulkan: 2 = AMD Radeon Graphics (RADV NAVI21) (radv) | uma: 0 | rebar: 0 | fp16: dot2 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 65536 | int dot: 1 | matrix cores: none
+Available devices:
+  Vulkan0: AMD Radeon Graphics (RADV VEGA20) (32752 MiB, 30784 MiB free)
+  Vulkan1: AMD Radeon Graphics (RADV NAVI21) (32768 MiB, 32748 MiB free)
+  Vulkan2: AMD Radeon Graphics (RADV NAVI21) (32768 MiB, 32748 MiB free)
+
+## build-vulkan, duo only
+ggml_vulkan: Found 2 Vulkan devices:
+Available devices:
+  Vulkan0: AMD Radeon Graphics (RADV NAVI21) (32768 MiB, 32748 MiB free)
+  Vulkan1: AMD Radeon Graphics (RADV NAVI21) (32768 MiB, 32748 MiB free)
