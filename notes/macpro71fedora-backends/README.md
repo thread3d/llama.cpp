@@ -41,6 +41,11 @@ token generation as the context fills up.
    prefill-heavy workload should know about the crossover.
 6. **Mixing ROCm and Vulkan in one run works**, is numerically correct, and runs
    at the speed of its slowest stage.
+7. **The fit now keeps a model on one die when it fits there**, instead of always
+   spreading it over both. That recovers the layer-split penalty measured above:
+   21 % of generation on the 0.6B and 4 % on the 8B, with models too large for one
+   die still spread over the pair. See
+   [What `--fit` does with the device count](#what---fit-does-with-the-device-count).
 
 Raw data is in `data/`, charts in `charts/`, the scripts in `scripts/`. The
 sibling study in `../vulkan-context-size-study/` is the original record of the
@@ -392,6 +397,90 @@ on both backends rather than a Vulkan quirk.
 
 Every result below therefore uses the default layer split.
 
+## What `--fit` does with the device count
+
+The measurements above say the second die costs 3 % to 21 % of generation for a
+model that would have fitted anyway. Until now that cost was paid by default: the
+fit saw two free devices, spread the model over both, and reported success.
+
+`common_fit_apply` in `common/common.cpp` now tries one device first. It measures
+the model and its context on the first discrete GPU, without allocating, and
+keeps that single device when the measurement leaves the free memory target
+intact. Otherwise it falls through to the multi-device fit exactly as before.
+
+It is a preference, not a policy: it does not touch the context size, does not
+decide CPU spill, and does not compute a tensor split. It decides how many
+devices to offer the existing fit. It steps aside when the choice is already the
+user's - `-dev`, `-sm tensor|row`, `-ngl`, `-ot`/`-cmoe`, `--override-kv` - when a
+draft or MTP model is loaded, and when a non-unified cache runs more than one
+sequence, since one measurement at `n_ctx` understates what several sequences
+need.
+
+### Where the model lands
+
+`llama-cli -v` on the Vulkan build, no `-dev`, so the fit decides, with
+`GGML_VK_VISIBLE_DEVICES=1,2`.
+
+| model | size | fit | model buffer |
+|---|---|---|---|
+| Qwen3-0.6B Q4_K_M | 456 MiB | fits on Vulkan0 | 372.65 MiB, one device |
+| Qwen3-8B Q8_0 | 8.7 GB | fits on Vulkan0 | 7669.77 MiB, one device |
+| Qwen3-30B-A3B Q4_K_M | 18.5 GB | fits on Vulkan0 | 17524.42 MiB, one device |
+| gemma-4-31B Q4_0 | 17.65 GB | fits on Vulkan0 | 16818.21 MiB, one device |
+| Qwen3-Coder-Next Q4_K_M | 45.15 GiB | does not fit | 23802.80 + 22265.40 MiB, both |
+| gpt-oss-120b MXFP4 | 63.4 GB | does not fit | both, 586.82 MiB on the host |
+| Qwen3-Next-80B-A3B Q8_0 | 84.7 GB | does not fit | both, 544.00 MiB on the host |
+
+The user's own choice wins in every case tested: `-dev Vulkan0,Vulkan1`, `-ngl 99`
+and `-dev none` all skip the preference and place the model where they were told.
+The ROCm build reaches the same decision naming `ROCm0`, and `llama-server` on the
+0.6B serves a completion from one device.
+
+### What it is worth
+
+The same generation, twice, with the fit deciding and with the devices pinned to
+the pair. `llama-cli`, `-c 2048 -n 128`, three runs each:
+
+| model | fit decides, one device | pinned to both | gain |
+|---|---|---|---|
+| Qwen3-0.6B Q4_K_M | 355.0, 356.0, 354.0 t/s | 293.7, 289.6, 294.5 t/s | **+21 %** |
+| Qwen3-8B Q8_0 | 52.6, 52.7, 52.6 t/s | 50.7, 51.8, 50.5 t/s | +4 % |
+
+Those gains match the layer-split penalties in the throughput tables above, 0.787x
+on the 0.6B and 0.960x on the 8B, so the change recovers exactly what the split
+cost and nothing more.
+
+Note that `llama-bench` calls `common_fit_params` directly and therefore does not
+see this change. Only the tools that load through `common_init_result` do:
+`llama-cli`, `llama-server`, `llama-perplexity` and the rest.
+
+### Models bigger than one die
+
+The capacity case, on models from the LM Studio store, with the devices pinned to
+the pair because one die cannot hold them. `llama-bench`, `-ngl 99`.
+
+Qwen3-Coder-Next Q4_K_M, 45.15 GiB, 79.67 B parameters, MoE:
+
+| test | `-fa 1` | `-fa 0` |
+|---|---|---|
+| pp512 | 1028.39 +/- 2.04 | 1019.72 +/- 0.80 |
+| pp512 @ d4096 | 906.49 +/- 5.51 | 931.93 +/- 17.15 |
+| pp512 @ d16384 | 611.65 +/- 8.16 | - |
+| tg128 | 76.53 +/- 0.18 | 75.98 +/- 0.16 |
+| tg128 @ d4096 | 74.90 +/- 0.17 | 73.38 +/- 0.37 |
+| tg128 @ d16384 | 70.25 +/- 0.09 | - |
+
+Flash attention is flat over two Vulkan dies on this model, so the ROCm crossover
+in the section above does not appear here. gemma-4-31B Q4_0 on one die, as the
+reference for a model that stays put: pp512 378.02 +/- 0.13, tg128 23.92 +/- 0.01,
+pp512 @ d4096 303.27 +/- 0.53, tg128 @ d4096 22.16 +/- 0.03.
+
+Generation at 4096 context across the store: gpt-oss-120b MXFP4 at 63.4 GB reaches
+79.4 t/s over the pair, Qwen3-Coder-Next at 45.15 GiB reaches 76.5 t/s, and
+Qwen3-Next-80B-A3B Q8_0 at 84.7 GB needs the pair plus 544 MiB on the host and
+falls to 7.1 t/s. The 84.7 GB model is the one that does not really work here; its
+Q4 equivalent would be the right choice.
+
 ## Mixed backends
 
 Every other section runs one backend at a time, because that is what the shipped
@@ -465,6 +554,19 @@ scripts/device-tests.sh       # the shipped test binaries, per topology
 OPS_FILTER=FLASH_ATTN_EXT scripts/device-tests.sh   # just the one op
 ```
 
+The device-count section has its own two scripts, which need the Vulkan build and
+the LM Studio models:
+
+```
+scripts/fit-placement.sh      # where each model lands, and the pinned A/B
+scripts/fit-large-models.sh   # the 45 to 85 GiB models, several runs each
+```
+
+Both write one log per step into `logs/` and skip a step whose log already exists,
+so a run can be resumed after a reboot. `fit-placement.sh` reads the fit's own
+decision from the log line `model fits on`, so it only works on a build that
+carries the change.
+
 The mixed-backend section additionally needs a third build and its own script:
 
 ```
@@ -506,3 +608,16 @@ derived artifacts and are not committed.
   `../vulkan-context-size-study/` records a TOPK_MOE defect that only wave64
   hardware would hit.
 - Row split is unavailable on both backends, so no series exercises it.
+- The device-count preference only considers the first discrete GPU as the single
+  device. On a machine with two unequal GPUs the smaller one may be chosen even
+  where the larger would be a better single home; nothing here measured that.
+- That preference runs one no-alloc measurement at startup on any machine with
+  more than one GPU. For the 45 GiB model it costs a few hundred milliseconds,
+  because it reads metadata and shapes and allocates nothing.
+- Not exercised by the device-count tests: more than one sequence with a
+  non-unified cache, which the change deliberately skips; draft and MTP models,
+  which it also skips; RPC backends; tensor and row split modes.
+- The ollama store on this machine cannot be used from llama.cpp: `ollama list`
+  shows models from 65 GB to 81 GB, but `/usr/share/ollama` is mode 700 and owned
+  by `ollama`, so the blobs cannot be read without root. The models in the
+  capacity section come from the LM Studio store instead.
