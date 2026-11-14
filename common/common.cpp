@@ -1235,6 +1235,41 @@ common_gguf_info common_get_gguf_info(const std::string & fname) {
     return info;
 }
 
+// true when the model and its context fit on dev alone, leaving margin free
+static bool common_fit_fits_on_device(
+        const std::vector<std::string> & paths_model,
+              const llama_model_params & mparams,
+            const llama_context_params & cparams,
+                    ggml_backend_dev_t   dev,
+                                size_t   margin,
+                        ggml_log_level   log_level) {
+    llama_model_params mparams_try = mparams;
+
+    ggml_backend_dev_t devs_try[2] = { dev, nullptr };
+    mparams_try.devices = devs_try;
+
+    std::vector<ggml_backend_dev_t> devs;
+    uint32_t hp_ngl         = 0;
+    uint32_t hp_ngl_skip    = 0;
+    uint32_t hp_n_ctx_train = 0;
+    uint32_t hp_n_expert    = 0;
+
+    common_device_memory_data_vec dmds;
+    try {
+        dmds = common_get_device_memory_data(paths_model, &mparams_try, &cparams, devs,
+            hp_ngl, hp_ngl_skip, hp_n_ctx_train, hp_n_expert, log_level);
+    } catch (const std::runtime_error &) {
+        return false;
+    }
+
+    if (devs.size() != 1 || dmds.size() != 2) {
+        return false;
+    }
+
+    const int64_t used = (int64_t) dmds[0].model + (int64_t) dmds[0].context + (int64_t) dmds[0].compute;
+    return dmds[0].free - used >= (int64_t) margin;
+}
+
 void common_fit_apply(common_params & params, llama_model_params & mparams, llama_context_params & cparams) {
     if (!params.fit_params) {
         return;
@@ -1263,6 +1298,61 @@ void common_fit_apply(common_params & params, llama_model_params & mparams, llam
         /*.cparams      =*/ &cparams_dft,
         /*.shares_model =*/ !has_draft, // an MTP context runs on the weights of the main model
     };
+
+    // A layer split copies the hidden state at every device boundary, which costs throughput.
+    // Keep the model on one device when it fits there and spread only when it does not. Skip this
+    // when the user chose the devices or the split, since the fit must then respect that choice.
+    const bool devices_chosen = !params.devices.empty();
+    // the overrides list is padded so that the fit can write into it, so an entry only counts as
+    // set by the user when it has a pattern
+    const bool overrides_set  = !params.tensor_buft_overrides.empty() &&
+                                params.tensor_buft_overrides.front().pattern != nullptr;
+    const bool split_chosen   = mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR ||
+                                mparams.split_mode == LLAMA_SPLIT_MODE_ROW   ||
+                                mparams.n_gpu_layers != llama_model_default_params().n_gpu_layers ||
+                                overrides_set                                ||
+                                !params.kv_overrides.empty();
+    // without a unified cache a sequence needs its own context, so one measurement at n_ctx
+    // understates the need; only decide this for a single sequence
+    const bool one_stream     = cparams.kv_unified || cparams.n_seq_max <= 1;
+
+    if (!devices_chosen && !split_chosen && !has_draft && !spec_mtp && one_stream) {
+        // prefer a discrete GPU over an integrated one, as the model's own device selection does
+        ggml_backend_dev_t gpu_first  = nullptr;
+        ggml_backend_dev_t igpu_first = nullptr;
+        size_t             n_gpus     = 0;
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+            if (type == GGML_BACKEND_DEVICE_TYPE_GPU) {
+                n_gpus++;
+                if (gpu_first == nullptr) {
+                    gpu_first = dev;
+                }
+            } else if (type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
+                n_gpus++;
+                if (igpu_first == nullptr) {
+                    igpu_first = dev;
+                }
+            }
+        }
+        const ggml_backend_dev_t dev_one = gpu_first ? gpu_first : igpu_first;
+
+        if (n_gpus > 1 && dev_one != nullptr) {
+            const ggml_log_level log_level = params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR;
+            if (common_fit_fits_on_device(params.model.get_paths(), mparams, cparams, dev_one,
+                    params.fit_params_target.front(), log_level)) {
+                COM_TRC("%s: model fits on %s, not splitting it across %zu devices\n",
+                    __func__, ggml_backend_dev_name(dev_one), n_gpus);
+                // the device list is read until a null entry
+                params.devices  = { dev_one, nullptr };
+                mparams.devices = params.devices.data();
+                return;
+            }
+            COM_TRC("%s: model does not fit on %s alone, keeping the device split\n",
+                __func__, ggml_backend_dev_name(dev_one));
+        }
+    }
 
     common_fit_params(params.model.get_paths(), &mparams, &cparams,
         params.tensor_split,
