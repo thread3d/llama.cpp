@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <shared_mutex>
+#include <vector>
 
 static void * portable_aligned_malloc(size_t align, size_t size) {
 #ifdef _WIN32
@@ -777,13 +778,13 @@ void ggml_vk_buffer_copy(vk_buffer& dst, size_t dst_offset, vk_buffer& src, size
         ggml_vk_submit_sync(src->device, subctx);
     } else {
         VK_LOG_DEBUG("ggml_vk_buffer_copy(MULTI_DEVICE, " << size << ")");
-        // Copy device to device
-        ggml_vk_ensure_sync_staging_buffer(src->device, size);
+        // the device staging buffer is shared by every context using that device, so copying
+        //   between two devices stages through memory owned by this thread instead
+        static thread_local std::vector<uint8_t> staging;
+        staging.resize(size);
 
-        // Copy to src staging buffer
-        ggml_vk_buffer_copy(src->device->sync_staging, 0, src, src_offset, size);
-        // Copy to dst buffer
-        ggml_vk_buffer_write(dst, dst_offset, src->device->sync_staging->ptr, size);
+        ggml_vk_buffer_read(src, src_offset, staging.data(), size);
+        ggml_vk_buffer_write(dst, dst_offset, staging.data(), size);
     }
 }
 
