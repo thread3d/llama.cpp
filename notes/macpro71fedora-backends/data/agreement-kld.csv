@@ -1,0 +1,8 @@
+topology,role,ppl,ppl_ratio,ppl_ratio_err,mean_kld,mean_kld_err,rms_dp,rms_dp_err,same_top_p,same_top_p_err,exit,seconds,status
+cpu,reference,5.7904,nan,nan,nan,nan,nan,nan,nan,nan,0,2.1,ok
+rocm-die1,scored,nan,0.999981,0.00662,0.008612,0.001466,2.378,0.399,97.255,0.724,0,1.2,ok
+rocm-die2,scored,nan,0.999981,0.00662,0.008612,0.001466,2.378,0.399,97.255,0.724,0,1.1,ok
+rocm-both,scored,nan,0.999981,0.00662,0.008612,0.001466,2.378,0.399,97.255,0.724,0,1.5,ok
+vk-die1,scored,nan,0.997135,0.006369,0.00764,0.001018,2.574,0.526,96.667,0.796,0,0.9,ok
+vk-die2,scored,nan,0.997135,0.006369,0.00764,0.001018,2.574,0.526,96.667,0.796,0,0.9,ok
+vk-both,scored,nan,0.997135,0.006369,0.00764,0.001018,2.574,0.526,96.667,0.796,0,1.0,ok

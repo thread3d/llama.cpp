@@ -181,7 +181,9 @@ def main():
 
     os.makedirs(WORK, exist_ok=True)
     models_dir = prepare_models(args.models.split(","))
-    logs_root = os.path.join(WORK, "run-logs")
+    # one log directory per invocation: two sweeps running at once (or a probe
+    # run beside a sweep) must not delete each other's per-case logs
+    logs_root = os.path.join(WORK, "run-logs", f"{args.label}-{int(time.time())}")
     os.makedirs(logs_root, exist_ok=True)
 
     ctxs = [int(c) for c in args.ctxs.split(",")]

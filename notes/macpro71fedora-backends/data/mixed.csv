@@ -1,0 +1,5 @@
+config,bench_dev,ppl_dev,pp_ts,tg_ts,mean_kld,same_top_p
+rocm only,ROCm0,ROCm0,3244.7,260.3,0.01153,95.686
+vulkan only,Vulkan2,Vulkan2,6160.8,402.7,0.009582,95.441
+mixed A,ROCm0/Vulkan2,"ROCm0,Vulkan2",3733.1,248.4,0.011148,95.931
+mixed B,Vulkan1/ROCm1,"Vulkan1,ROCm1",4023.1,276.5,0.009611,95.588

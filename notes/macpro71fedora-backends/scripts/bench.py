@@ -77,7 +77,9 @@ def run_cell(topology, model, depth, reps, timeout):
             "n_gen": n_gen,
             "avg_ts": float(r["avg_ts"]),
             "stddev_ts": float(r["stddev_ts"]),
-            "test_time_s": float(r["test_time"]),
+            # test_time is an ISO timestamp in this version; avg_ns is the
+            # wall clock of one evaluation, which is what a chart wants
+            "test_time_s": float(r["avg_ns"]) / 1e9,
             "seconds": round(dt, 2),
             "exit": rc,
             "status": "ok" if rc == 0 else ("timeout" if rc == -99 else "error"),

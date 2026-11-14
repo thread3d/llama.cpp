@@ -161,4 +161,6 @@ in the charts. `data/post-row.csv` keeps the measurement.
   are not part of this data; the sweeps here ran one at a time.
 - Reproducibility is asserted against a baseline computed in the same process and the same
   configuration. These numbers say nothing about agreement with a different backend or a
-  different build.
+  different build. The follow-up study in `../macpro71fedora-backends/` measures that part
+  for the whole machine, with KL divergence against CPU logits and with the CPU and ROCm
+  topologies added beside the two Vulkan dies.
