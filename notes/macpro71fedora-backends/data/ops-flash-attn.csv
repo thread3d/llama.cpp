@@ -1,0 +1,7 @@
+topology,backend,op,filter,jobs,passed,total,result
+rocm-die1,ROCm0,FLASH_ATTN_EXT,FLASH_ATTN_EXT,8,4322,4322,pass
+rocm-die2,ROCm0,FLASH_ATTN_EXT,FLASH_ATTN_EXT,8,4322,4322,pass
+rocm-both,ROCm0,FLASH_ATTN_EXT,FLASH_ATTN_EXT,8,4322,4322,pass
+vk-die1,Vulkan0,FLASH_ATTN_EXT,FLASH_ATTN_EXT,8,5639,5639,pass
+vk-die2,Vulkan0,FLASH_ATTN_EXT,FLASH_ATTN_EXT,8,5639,5639,pass
+vk-both,Vulkan0,FLASH_ATTN_EXT,FLASH_ATTN_EXT,8,5639,5639,pass

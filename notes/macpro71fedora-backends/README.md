@@ -33,8 +33,8 @@ token generation as the context fills up.
    generation over ROCm on one die at depth 0 for the 0.6B model, and 2.9x prompt
    at depth 32768 for the 8B.
 4. **The duo buys capacity, not speed.** With a model that fits on one die, the
-   layer split reduces generation by 4 % to 21 % depending on the model. None of
-   the models here needed 64 GiB.
+   layer split reduces generation by 3 % to 21 % depending on model and backend.
+   None of the models here needed 64 GiB.
 5. **Flash attention is the wrong choice for long prompt processing on ROCm.**
    At depth 16384 the non-flash path is 2x faster for pp512, while generation
    needs flash attention by 2.6x. The default is right for interactive use; a
@@ -293,20 +293,23 @@ module and it also means the single die series are not lucky or unlucky.
 
 **The second die costs throughput when the model already fits.** With a layer
 split the pipeline crosses the device boundary once per layer, and that copy is
-pure overhead when the model would have fitted anyway:
+pure overhead when the model would have fitted anyway. Ratio of both dies to one
+die, at depth 0, per backend:
 
-| model | pp both/one | tg both/one |
-|---|---|---|
-| 0.6B, depth 0 | 0.94x | 0.79x |
-| 8B, depth 0 | 1.01x | 0.96x |
-| 30B, depth 0 | 1.05x | 0.95x |
+| model | ROCm pp | ROCm tg | Vulkan pp | Vulkan tg |
+|---|---|---|---|---|
+| 0.6B | 0.93x | 0.85x | 0.94x | 0.79x |
+| 8B | 0.99x | 0.97x | 1.01x | 0.96x |
+| 30B | 0.96x | 0.93x | 1.05x | 0.95x |
 
-For the 0.6B that is a 21 % generation loss for no gain. The 30B, which is the
-only model here that presses on 32 GiB, is the exception on prompt processing
-(1.05x) but still loses 5 % on generation. Since the KV cache in this tree grows
-on demand, none of these models actually needed the second die; the conclusion is
-that the duo buys capacity, not speed, and that a workload which fits on one die
-should stay on one die.
+For the 0.6B on Vulkan that is a 21 % generation loss for no gain; ROCm loses
+less (15 %) because its single die is already slower, so the boundary is a
+smaller share of the work. The 30B, which is the only model here that presses on
+32 GiB, is the one exception on Vulkan prompt processing (1.05x) but still loses
+5 % on generation. Since the KV cache in this tree grows on demand, none of these
+models actually needed the second die; the conclusion is that the duo buys
+capacity, not speed, and that a workload which fits on one die should stay on
+one die.
 
 **Context is what separates CPU from GPU, not the model size.** Token generation
 on the CPU falls from 107.5 to 4.1 tokens/s between depth 0 and 32768, a factor
@@ -333,6 +336,22 @@ attention is 2.2x faster than the non-flash path, at 16384 it is 2.0x slower. Th
 same crossover appears on Qwen3-0.6B at depth 16384 (768.3 with `-fa 1` against
 1273.8 with `-fa 0`), so it is a property of the kernel and the head size rather
 than of one model.
+
+It is a performance result, not a correctness one. The flash attention op is
+correct on every device, including both dies at once:
+
+| topology | `test-backend-ops -o FLASH_ATTN_EXT` | comparison |
+|---|---|---|
+| ROCm, die 1 | 4322/4322 pass | ROCm0 against CPU |
+| ROCm, die 2 | 4322/4322 pass | ROCm0 against CPU |
+| ROCm, both dies | 4322/4322 pass | ROCm0 against CPU |
+| Vulkan, die 1 | 5639/5639 pass | Vulkan0 against CPU |
+| Vulkan, die 2 | 5639/5639 pass | Vulkan0 against CPU |
+| Vulkan, both dies | 5639/5639 pass | Vulkan0 against CPU |
+
+Vulkan runs 1317 more cases because its build covers more dtype combinations.
+There is no failing case behind the crossover: the narrow tile it falls back to
+is accurate, only slow.
 
 Turning flash attention off to recover prompt processing is the wrong trade on
 ROCm, because generation collapses at the same time: 37.9 against 14.7 tokens/s
@@ -436,14 +455,29 @@ python3 scripts/bench.py --label run1 --csv data/bench-qwen06.csv \
 python3 scripts/bench.py --label run1 --csv data/bench-qwen8.csv \
     --model Qwen3-8B-Q8_0.gguf --depths 0,4096,16384,32768 --reps 2 \
     --topologies rocm-die1,rocm-die2,rocm-both,vk-die1,vk-die2,vk-both
+python3 scripts/bench.py --label run1 --csv data/bench-qwen30.csv \
+    --model Qwen3-30B-A3B-Q4_K_M.gguf --depths 0,32768 --reps 1 \
+    --topologies rocm-die1,rocm-die2,rocm-both,vk-die1,vk-die2,vk-both
 
 python3 scripts/report.py     # the markdown tables above
 python3 scripts/charts.py     # the figures above
 scripts/device-tests.sh       # the shipped test binaries, per topology
+OPS_FILTER=FLASH_ATTN_EXT scripts/device-tests.sh   # just the one op
 ```
 
-`agreement.py` writes a 155 MB logits file into `../logs/agreement/`. It is a
-derived artifact and is not committed.
+The mixed-backend section additionally needs a third build and its own script:
+
+```
+ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm HIP_COMPILER=clang cmake -S ../.. -B ../../build-mixed \
+    -G Ninja -DGGML_HIP=ON -DGGML_VULKAN=ON -DAMDGPU_TARGETS=gfx1030 \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=/usr/bin/clang \
+    -DCMAKE_CXX_COMPILER=/usr/bin/clang++
+cmake --build ../../build-mixed --parallel $(nproc)
+python3 scripts/mixed.py
+```
+
+`agreement.py` and `mixed.py` write large logits files into `../logs/`. They are
+derived artifacts and are not committed.
 
 ## Limitations
 
