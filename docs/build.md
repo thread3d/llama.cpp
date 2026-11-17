@@ -93,6 +93,23 @@ cmake --build build --config Release
   - **Fedora / RHEL / Rocky / Alma:** `sudo dnf install openssl-devel`
   - **Arch / Manjaro:** `sudo pacman -S openssl`
 
+### OpenMP (macOS)
+
+OpenMP is enabled by default when CMake can find a runtime. Apple Clang does not accept plain
+`-fopenmp`, so CMake looks for a Homebrew runtime and uses `-Xclang -fopenmp` instead:
+
+```bash
+brew install libomp
+cmake -B build
+```
+
+Configuration then reports `Found OpenMP: TRUE` and the CPU backend links `libomp`. Pass
+`-DGGML_OPENMP=OFF` to disable it.
+
+OpenMP mainly speeds up token generation. It does not help prompt/batch processing, and can slow it
+down once threads outnumber physical cores, because its worker pool competes with ggml's own thread
+pool - so keep `-t` at the number of physical cores.
+
 ## BLAS Build
 
 Building the program with BLAS support may lead to some performance improvements in prompt processing using batch sizes higher than 32 (the default is 512). Using BLAS doesn't affect the generation performance. There are currently several different BLAS implementations available for build and use:
