@@ -1274,6 +1274,37 @@ void ggml_vec_dot_q5_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
     }
 
     *s = hsum_float_8(acc);
+#elif defined(__SSSE3__)
+    // the fifth bit lives one per element in qh; bytes_from_bits_16 spreads 16 packed bits into a
+    // 0xFF mask, so ANDing it with 16 gives the high nibble. quants are 5-bit unsigned minus 16,
+    // which keeps |q| <= 16 so maddubs stays exact.
+    const __m128i m4  = _mm_set1_epi8(0x0F);
+    const __m128i m16 = _mm_set1_epi8(16);
+
+    __m128 acc = _mm_setzero_ps();
+
+    for (; ib < nb; ++ib) {
+        const __m128 d = _mm_set1_ps(GGML_CPU_FP16_TO_FP32(x[ib].d)*GGML_CPU_FP16_TO_FP32(y[ib].d));
+
+        const __m128i qs = _mm_loadu_si128((const __m128i *)x[ib].qs);
+
+        const __m128i h0 = _mm_and_si128(bytes_from_bits_16(x[ib].qh),     m16);
+        const __m128i h1 = _mm_and_si128(bytes_from_bits_16(x[ib].qh + 2), m16);
+
+        const __m128i v0 = _mm_sub_epi8(_mm_or_si128(_mm_and_si128(qs, m4), h0), m16);
+        const __m128i v1 = _mm_sub_epi8(_mm_or_si128(_mm_and_si128(_mm_srli_epi16(qs, 4), m4), h1), m16);
+
+        const __m128i y0 = _mm_loadu_si128((const __m128i *)y[ib].qs);
+        const __m128i y1 = _mm_loadu_si128((const __m128i *)(y[ib].qs + 16));
+
+        const __m128i i32 = _mm_add_epi32(mul_sum_i8_pairs(v0, y0), mul_sum_i8_pairs(v1, y1));
+
+        acc = _mm_add_ps(acc, _mm_mul_ps(d, _mm_cvtepi32_ps(i32)));
+    }
+
+    acc = _mm_hadd_ps(acc, acc);
+    acc = _mm_hadd_ps(acc, acc);
+    *s = _mm_cvtss_f32(acc);
 #else
     UNUSED(nb);
     UNUSED(ib);
@@ -1423,6 +1454,26 @@ void ggml_vec_dot_q8_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
     }
 
     sumf = hsum_float_8(accum);
+#elif defined(__SSSE3__)
+    __m128 acc = _mm_setzero_ps();
+
+    for (; ib < nb; ++ib) {
+        const __m128 d = _mm_set1_ps(GGML_CPU_FP16_TO_FP32(x[ib].d)*GGML_CPU_FP16_TO_FP32(y[ib].d));
+
+        const __m128i qx_0 = _mm_loadu_si128((const __m128i *)x[ib].qs);
+        const __m128i qx_1 = _mm_loadu_si128((const __m128i *)x[ib].qs + 1);
+        const __m128i qy_0 = _mm_loadu_si128((const __m128i *)y[ib].qs);
+        const __m128i qy_1 = _mm_loadu_si128((const __m128i *)y[ib].qs + 1);
+
+        // 32 int8 products as 8 int32; the halves are added after widening, not as int16
+        const __m128i i32 = _mm_add_epi32(mul_sum_i8_pairs(qx_0, qy_0), mul_sum_i8_pairs(qx_1, qy_1));
+
+        acc = _mm_add_ps(acc, _mm_mul_ps(d, _mm_cvtepi32_ps(i32)));
+    }
+
+    acc = _mm_hadd_ps(acc, acc);
+    acc = _mm_hadd_ps(acc, acc);
+    sumf = _mm_cvtss_f32(acc);
 #endif
     for (; ib < nb; ++ib) {
         int sumi = 0;
@@ -2265,6 +2316,78 @@ void ggml_vec_dot_q4_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
     *s = hsum_float_8(acc) + _mm_cvtss_f32(acc_m);
 
+#elif defined __SSSE3__
+
+    // a nibble is 0..15 and q8 is signed, so maddubs is exact here; the per-sub-block scale
+    // is applied in float, which keeps every integer step inside int32
+    const __m128i m4 = _mm_set1_epi8(0x0F);
+    const __m128i m1 = _mm_set1_epi16(1);
+
+    __m128 facc = _mm_setzero_ps();
+    float sumf = 0;
+
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t * GGML_RESTRICT q4 = x[i].qs;
+        const int8_t  * GGML_RESTRICT q8 = y[i].qs;
+
+        memcpy(utmp, x[i].scales, 12);
+        utmp[3] = ((utmp[2] >> 4) & kmask2) | (((utmp[1] >> 6) & kmask3) << 4);
+        const uint32_t uaux = utmp[1] & kmask1;
+        utmp[1] = (utmp[2] & kmask2) | (((utmp[0] >> 6) & kmask3) << 4);
+        utmp[2] = uaux;
+        utmp[0] &= kmask1;
+
+        const uint8_t * GGML_RESTRICT scales = (const uint8_t *) &utmp[0];
+        const uint8_t * GGML_RESTRICT mins   = (const uint8_t *) &utmp[2];
+
+        const float d    = y[i].d * GGML_CPU_FP16_TO_FP32(x[i].d);
+        const float dmin = y[i].d * GGML_CPU_FP16_TO_FP32(x[i].dmin);
+
+        float dscale[8];
+        for (int k = 0; k < 8; ++k) {
+            dscale[k] = d * (float) scales[k];
+        }
+
+        // 128 packed bytes hold 8 sub-blocks of 32: two per group, low nibbles then high
+        for (int j = 0; j < QK_K/64; ++j) {
+            const __m128i v0 = _mm_loadu_si128((const __m128i *)(q4 + 32*j));
+            const __m128i v1 = _mm_loadu_si128((const __m128i *)(q4 + 32*j + 16));
+
+            const __m128i lo0 = _mm_and_si128(v0, m4);
+            const __m128i lo1 = _mm_and_si128(v1, m4);
+            const __m128i hi0 = _mm_and_si128(_mm_srli_epi16(v0, 4), m4);
+            const __m128i hi1 = _mm_and_si128(_mm_srli_epi16(v1, 4), m4);
+
+            const int8_t * GGML_RESTRICT qa = q8 + 64*j;
+            const int8_t * GGML_RESTRICT qb = qa + 32;
+
+            const __m128i qa0 = _mm_loadu_si128((const __m128i *)qa);
+            const __m128i qa1 = _mm_loadu_si128((const __m128i *)(qa + 16));
+            const __m128i qb0 = _mm_loadu_si128((const __m128i *)qb);
+            const __m128i qb1 = _mm_loadu_si128((const __m128i *)(qb + 16));
+
+            const __m128i da = _mm_add_epi32(_mm_madd_epi16(_mm_maddubs_epi16(lo0, qa0), m1),
+                                             _mm_madd_epi16(_mm_maddubs_epi16(lo1, qa1), m1));
+            const __m128i db = _mm_add_epi32(_mm_madd_epi16(_mm_maddubs_epi16(hi0, qb0), m1),
+                                             _mm_madd_epi16(_mm_maddubs_epi16(hi1, qb1), m1));
+
+            facc = _mm_add_ps(facc, _mm_mul_ps(_mm_set1_ps(dscale[2*j]),     _mm_cvtepi32_ps(da)));
+            facc = _mm_add_ps(facc, _mm_mul_ps(_mm_set1_ps(dscale[2*j + 1]), _mm_cvtepi32_ps(db)));
+        }
+
+        // the min term: sumf -= dmin * sum_j bsums[j] * mins[j/2]
+        int sumi = 0;
+        for (int j = 0; j < QK_K/16; ++j) {
+            sumi += y[i].bsums[j] * mins[j/2];
+        }
+        sumf -= dmin * sumi;
+    }
+
+    facc = _mm_hadd_ps(facc, facc);
+    facc = _mm_hadd_ps(facc, facc);
+    sumf += _mm_cvtss_f32(facc);
+    *s = sumf;
+
 #else
     UNUSED(x);
     UNUSED(y);
@@ -2675,6 +2798,64 @@ void ggml_vec_dot_q6_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
     }
 
     *s = hsum_float_8(acc);
+
+#elif defined __SSSE3__
+
+    // 6-bit quants are (nibble | (two bits from qh) << 4) - 32, so they are signed and maddubs
+    // needs the abs/sign pair mul_sum_i8_pairs already provides; |q| <= 32 keeps the int16 sums
+    // exact and the per-sub-block scale is applied in float
+    const __m128i m4  = _mm_set1_epi8(0x0F);
+    const __m128i m3  = _mm_set1_epi8(0x03);
+    const __m128i m32 = _mm_set1_epi8(32);
+
+    __m128 facc = _mm_setzero_ps();
+
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t * GGML_RESTRICT ql = x[i].ql;
+        const uint8_t * GGML_RESTRICT qh = x[i].qh;
+        const int8_t  * GGML_RESTRICT q8 = y[i].qs;
+
+        const float d = y[i].d * GGML_CPU_FP16_TO_FP32(x[i].d);
+
+        // the super-block is two halves of 128 elements, each four groups of 32
+        for (int j = 0; j < QK_K/128; ++j) {
+            const uint8_t * GGML_RESTRICT l = ql + 64*j;
+            const uint8_t * GGML_RESTRICT h = qh + 32*j;
+            const int8_t  * GGML_RESTRICT q = q8 + 128*j;
+
+            const __m128i qh0 = _mm_loadu_si128((const __m128i *)h);
+            const __m128i qh1 = _mm_loadu_si128((const __m128i *)(h + 16));
+
+            for (int k = 0; k < 4; ++k) {
+                // k 0,1 take the low nibble, k 2,3 the high one; the qh bits walk 0,2,4,6
+                const uint8_t * GGML_RESTRICT lb = l + ((k & 1) ? 32 : 0);
+                const int sh = 2*k;
+
+                const __m128i ql0 = _mm_loadu_si128((const __m128i *)lb);
+                const __m128i ql1 = _mm_loadu_si128((const __m128i *)(lb + 16));
+
+                const __m128i n0 = (k < 2) ? _mm_and_si128(ql0, m4) : _mm_and_si128(_mm_srli_epi16(ql0, 4), m4);
+                const __m128i n1 = (k < 2) ? _mm_and_si128(ql1, m4) : _mm_and_si128(_mm_srli_epi16(ql1, 4), m4);
+
+                const __m128i v0 = _mm_sub_epi8(_mm_or_si128(n0, _mm_slli_epi16(_mm_and_si128(_mm_srli_epi16(qh0, sh), m3), 4)), m32);
+                const __m128i v1 = _mm_sub_epi8(_mm_or_si128(n1, _mm_slli_epi16(_mm_and_si128(_mm_srli_epi16(qh1, sh), m3), 4)), m32);
+
+                const int8_t * GGML_RESTRICT qq = q + 32*k;
+                const __m128i y0 = _mm_loadu_si128((const __m128i *)qq);
+                const __m128i y1 = _mm_loadu_si128((const __m128i *)(qq + 16));
+
+                const int g = 4*j + k;   // this group covers sub-blocks 2g and 2g+1
+                facc = _mm_add_ps(facc, _mm_mul_ps(_mm_set1_ps(d * (float) x[i].scales[2*g]),
+                                                  _mm_cvtepi32_ps(mul_sum_i8_pairs(v0, y0))));
+                facc = _mm_add_ps(facc, _mm_mul_ps(_mm_set1_ps(d * (float) x[i].scales[2*g + 1]),
+                                                  _mm_cvtepi32_ps(mul_sum_i8_pairs(v1, y1))));
+            }
+        }
+    }
+
+    facc = _mm_hadd_ps(facc, facc);
+    facc = _mm_hadd_ps(facc, facc);
+    *s = _mm_cvtss_f32(facc);
 
 #else
     UNUSED(x);
