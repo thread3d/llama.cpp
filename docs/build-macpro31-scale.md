@@ -175,8 +175,10 @@ the two datasets differ in exactly one number. Raw records: `macpro31/bench-*-4t
 - **Generation loses much less, and only where the format has a vector kernel.** `q4_0` and `q8_0`
   hold 91 to 96 percent of their 7-thread rate: four threads already put the memory bus close to
   saturation, so the three extra threads buy almost nothing. `q4_K_M` holds 77 to 82 percent and
-  `f16` 75 percent, so the K-quant kernels do still gain from the extra threads. `q4_0` is thus the
-  best format for a 4-thread setting, on generation as well as prefill.
+  `f16` 75 percent, so the K-quant kernels do still gain from the extra threads. The format ranking
+  does not collapse to a single winner at 4 threads: on the 0.5B, `q4_0` leads both tests (41.62
+  against 34.23 prefill, 15.69 against 12.29 generation), but on the 1.5B `q4_K_M` keeps the
+  prefill edge (13.71 against 12.18) while `q4_0` generates 24 percent faster (5.78 against 4.66).
 - **Depth costs a little more at 4 threads in both directions.** For Qwen2.5-0.5B the prefill ratio
   falls from 60 percent at depth 0 to 53 percent at 4096, and generation from 87 to 76 percent: the
   attention pass over the KV cache is partly compute, so it scales with threads as well.
