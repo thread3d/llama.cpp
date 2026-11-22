@@ -49,6 +49,10 @@ situation are in that document; this one reports measurements.
   19.85 GB) are not part of the six-model comparison: they were measured with the same build,
   threads and gate, but with `MODELS_DIR` pointing at a directory holding only those two, so they
   could be added without repeating the twelve files the main sweep had already measured.
+- **A second full sweep was run at 4 threads**, same seed, same schedule and same build, so the two
+  datasets differ only in the thread count. 7 threads remains the baseline everywhere in this
+  document; the comparison is in "What four threads change" below, and its records are the
+  `macpro31/bench-*-4t.jsonl` files.
 
 ## Throughput against model size
 
@@ -142,6 +146,47 @@ are what is on the disk.
 `stories260K` is a 1.1 MB toy model included because it is on the disk; its numbers only show that
 the harness itself has no fixed overhead worth worrying about.
 
+## What four threads change
+
+The whole sweep was repeated at `THREADS=4` — same seed, same randomized schedule, same build — so
+the two datasets differ in exactly one number. Raw records: `macpro31/bench-*-4t.jsonl`.
+
+![Throughput at 7 and 4 threads](macpro31/threads-throughput.svg)
+
+| model | 7t prefill | 4t prefill | 4t/7t | 7t gen | 4t gen | 4t/7t |
+|---|---|---|---|---|---|---|
+| Qwen2.5-0.5B q4_0 | 69.36 | 41.62 | 60% | 16.42 | 15.69 | 96% |
+| Qwen2.5-0.5B q4_K_M | 56.95 | 34.23 | 60% | 14.98 | 12.29 | 82% |
+| Qwen2.5-0.5B q8_0 | 56.05 | 34.02 | 61% | 11.42 | 10.38 | 91% |
+| Qwen2.5-0.5B f16 | 13.36 | 8.17 | 61% | 5.25 | 3.96 | 75% |
+| Llama-3.2-1B q4_K_M | 32.38 | 19.37 | 60% | 7.46 | 5.71 | 77% |
+| Qwen2.5-1.5B q4_0 | 20.21 | 12.18 | 60% | 5.99 | 5.78 | 96% |
+| Qwen2.5-1.5B q4_K_M | 23.04 | 13.71 | 60% | 5.89 | 4.66 | 79% |
+| Qwen2.5-3B q4_K_M | 10.91 | 6.58 | 60% | 3.09 | 2.44 | 79% |
+| Mistral-7B q4_0 | 4.04 | 2.42 | 60% | 1.58 | 1.47 | 93% |
+| Mistral-7B q4_K_M | 4.49 | 2.68 | 60% | 1.46 | 1.15 | 79% |
+| Qwen3-8B q4_K_M | 4.46 | 2.66 | 60% | 1.32 | 1.03 | 78% |
+| Qwen2.5-14B q4_K_M | 2.34 | 1.40 | 60% | 0.74 | 0.57 | 78% |
+| Qwen2.5-32B q4_K_M | 0.98 | 0.58 | 59% | 0.33 | 0.25 | 77% |
+
+- **Prefill scales with cores and nothing else.** 59 to 61 percent everywhere, from 0.5B to 32B.
+  That is the thread ratio (4/7 = 57 percent) plus a little less per-thread contention. No
+  model-size dependence at all, which is what "compute bound" means concretely.
+- **Generation loses much less, and only where the format has a vector kernel.** `q4_0` and `q8_0`
+  hold 91 to 96 percent of their 7-thread rate: four threads already put the memory bus close to
+  saturation, so the three extra threads buy almost nothing. `q4_K_M` holds 77 to 82 percent and
+  `f16` 75 percent, so the K-quant kernels do still gain from the extra threads. `q4_0` is thus the
+  best format for a 4-thread setting, on generation as well as prefill.
+- **Depth costs a little more at 4 threads in both directions.** For Qwen2.5-0.5B the prefill ratio
+  falls from 60 percent at depth 0 to 53 percent at 4096, and generation from 87 to 76 percent: the
+  attention pass over the KV cache is partly compute, so it scales with threads as well.
+- **On a shared desktop this is arguably the better default.** Four threads give up 40 percent of
+  prefill — latency paid once per prompt — and 4 to 25 percent of generation, which is what you
+  actually watch, while leaving four cores for everything else. The 7-thread figures stay the
+  baseline in the rest of this document; this is a comparison, not a replacement.
+- `stories260K` reads 117 percent on generation, which is meaningless: sub-millisecond runs on a
+  1.1 MB toy model.
+
 ## What the numbers say
 
 - **Prompt processing delivers a nearly constant number of operations per second.** Throughput
@@ -201,6 +246,12 @@ python3 scripts/plot-macpro31-large.py \
 MODELS_DIR=~/models-large THREADS=7 scripts/bench-macpro31.sh coverage   # the 14B and 32B pass
 python3 scripts/plot-macpro31-coverage.py \
     docs/macpro31/bench-coverage.jsonl docs/macpro31/bench-coverage-xl.jsonl docs/macpro31
+
+# the same sweep at 4 threads, then the comparison
+MODELS_DIR=~/models THREADS=4 OUT=~/bench-macpro31-t4.jsonl scripts/bench-macpro31.sh all
+python3 scripts/plot-macpro31-threads.py docs/macpro31 \
+    docs/macpro31/bench-coverage.jsonl docs/macpro31/bench-coverage-xl.jsonl \
+    -- docs/macpro31/bench-coverage-4t.jsonl
 ```
 
 `bench-macpro31.sh` needs `MODELS_DIR` to hold the GGUF files it names. It is resumable: runs
