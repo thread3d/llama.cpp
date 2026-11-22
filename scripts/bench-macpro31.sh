@@ -13,13 +13,15 @@
 # llama-bench emits one record per test: prompt processing has n_gen == 0, token generation has
 # n_prompt == 0. A condition with test=both is one process that runs both tests.
 #
-# Usage: scripts/bench-macpro31.sh [large|scale|depth|all]
-#   large   scale and depth in one interleaved schedule (default)
-#   scale   six models from 0.5B to 8B at depth 0
-#   depth   generation and prompt processing at contexts up to 4096
-#   all     the older context and quant phases as well
+# Usage: scripts/bench-macpro31.sh [large|scale|depth|coverage|all]
+#   large    scale and depth in one interleaved schedule (default)
+#   scale    six models from 0.5B to 8B at depth 0
+#   depth    generation and prompt processing at contexts up to 4096
+#   coverage every GGUF file in MODELS_DIR at depth 0, so the sweep includes the whole model set
+#   all      the scale, depth, context, quant and coverage phases together
 #
-# Environment: MODELS_DIR, OUT, SEED, THREADS, PP, TG, GATE, GATE_LOAD, GATE_MAX_WAIT
+# Environment: MODELS_DIR, OUT, SEED, THREADS, PP, TG, GATE, GATE_CPU, GATE_LOAD, GATE_POLL,
+#              GATE_MAX_WAIT
 
 set -euo pipefail
 
@@ -37,10 +39,15 @@ PP=${PP:-128}
 TG=${TG:-32}
 GATE=${GATE:-1}
 # The desktop session alone keeps this machine near load 1.5, and the 1-minute load average still
-# shows our own previous run for a while, so the gate relies on the CPU of the jobs that actually
-# ruin a measurement. GATE_LOAD is only a runaway safety net.
+# shows our own previous run for a while, so the CPU figure is the primary signal. The load limit
+# still earns its place: Spotlight indexing the external volumes and Time Machine thinning them put
+# the machine into I/O wait, where the blocker processes show almost no CPU but a run measures
+# badly.
 GATE_LOAD=${GATE_LOAD:-12.0}
 GATE_CPU=${GATE_CPU:-20}
+# How often to re-test for idleness. Long intervals miss the short windows between Spotlight
+# bursts, and every miss costs a whole interval of wall time, so this is deliberately short.
+GATE_POLL=${GATE_POLL:-20}
 GATE_MAX_WAIT=${GATE_MAX_WAIT:-21600}
 
 BASE=${OUT%.jsonl}
@@ -49,11 +56,14 @@ BASE=${OUT%.jsonl}
 
 # plan <mode> -> "<group> <model> <depth> <test> <rep>" lines, one randomized round at a time
 plan() {
-    python3 - "$SEED" "$1" <<'PY'
+    python3 - "$SEED" "$1" "$MODELS_DIR" <<'PY'
+import glob
+import os
 import random
 import sys
 
 seed, mode = int(sys.argv[1]), sys.argv[2]
+models_dir = sys.argv[3]
 
 Q05 = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 L1B = "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
@@ -89,6 +99,12 @@ if mode == "all":
               "qwen2.5-0.5b-instruct-q8_0.gguf", "qwen2.5-0.5b-instruct-fp16.gguf"):
         conditions.append(("quant", m, 0, "both", 4))
 
+if mode in ("coverage", "all"):
+    # every GGUF file in MODELS_DIR, so no model on the machine is left unmeasured; the point is
+    # coverage rather than a controlled comparison, hence the smaller repeat count
+    for path in sorted(glob.glob(os.path.join(models_dir, "*.gguf"))):
+        conditions.append(("coverage", os.path.basename(path), 0, "both", 3))
+
 def key(c):
     return (c[0], c[1], c[2], c[3])
 
@@ -122,9 +138,18 @@ print("\n".join(work))
 PY
 }
 
+# Time Machine is reported in the gate log but is not blocked on directly. Blocking on
+# `tmutil status` looks safer than it is: a backup that begins just after the gate passed is not
+# caught either way, while a light thinning phase can hold `Running = 1` for half an hour with
+# backupd at 1-5% CPU. What actually ruins a run is CPU and I/O contention, so backupd and
+# backupd-helper are in the CPU blocker list below and the gate acts on that.
+tm_running() {
+    tmutil status 2>/dev/null | grep -q 'Running = 1'
+}
+
 # combined CPU percent of the background jobs that ruin a measurement; parked helpers cost nothing
 blocker_cpu() {
-    ps -Ao pcpu,comm | grep -E '/(rsync|mds|mds_stores|mdworker|MRT|fseventsd)$' |
+    ps -Ao pcpu,comm | grep -E '/(rsync|backupd|backupd-helper|mds|mds_stores|mdworker|MRT|fseventsd)$' |
         awk '{ s += $1 } END { printf "%d", s + 0 }'
 }
 
@@ -138,16 +163,18 @@ machine_idle() {
 
 wait_for_idle() {
     [ "$GATE" = "1" ] || return 0
-    local waited=0 load
+    local waited=0 load tm
     while ! machine_idle; do
         if [ "$waited" -ge "$GATE_MAX_WAIT" ]; then
             echo "[gate] still busy after ${GATE_MAX_WAIT}s" >&2
             return 1
         fi
         load=$(sysctl -n vm.loadavg | awk '{print $2}')
-        printf '[gate] busy (load %s, background cpu %s%%, waited %ss)\n' "$load" "$(blocker_cpu)" "$waited" >&2
-        sleep 60
-        waited=$((waited + 60))
+        if tm_running; then tm=yes; else tm=no; fi
+        printf '[gate] busy (load %s, background cpu %s%%, time machine %s, waited %ss)\n' \
+            "$load" "$(blocker_cpu)" "$tm" "$waited" >&2
+        sleep "$GATE_POLL"
+        waited=$((waited + GATE_POLL))
     done
     if [ "$waited" -gt 0 ]; then
         echo "[gate] idle after ${waited}s" >&2
@@ -191,6 +218,7 @@ case "${1:-large}" in
     large) run_phase large "${BASE}-large-plan.tsv" "${BASE}-large-done.tsv" ;;
     scale) run_phase scale "${BASE}-scale-plan.tsv" "${BASE}-scale-done.tsv" ;;
     depth) run_phase depth "${BASE}-depth-plan.tsv" "${BASE}-depth-done.tsv" ;;
+    coverage) run_phase coverage "${BASE}-coverage-plan.tsv" "${BASE}-coverage-done.tsv" ;;
     all)   run_phase all   "${BASE}-all-plan.tsv"   "${BASE}-all-done.tsv" ;;
-    *)     echo "usage: $0 [large|scale|depth|all]" >&2; exit 1 ;;
+    *)     echo "usage: $0 [large|scale|depth|coverage|all]" >&2; exit 1 ;;
 esac
