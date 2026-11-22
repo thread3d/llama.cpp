@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build llama.cpp on macpro31 (Mac Pro 3,1, OS X 10.11.6 El Capitan, Darwin 15.6).
-# CPUs: 2x Xeon X5482 (Harpertown: SSE4.1, no AVX), 24 GiB RAM.
+# CPUs: 2x Xeon X5482 (Harpertown: SSE4.1, no AVX), 32 GiB RAM.
 # GPU: NVIDIA Quadro 4000 (Fermi GF100) - not Metal capable, so no GPU backend can run here.
 #
 # Apple clang cannot build this tree before macOS 10.15, because libc++ marks std::filesystem
@@ -22,17 +22,27 @@ JOBS=${JOBS:-$(sysctl -n hw.ncpu)}
 BUILD=build-macpro31-cpu
 
 # GGML_NATIVE=ON gives -march=native, which on Harpertown is core2 plus SSE4.1 and no AVX.
+# GGML_OPENMP=OFF: MacPorts GCC ships libgomp, so the OpenMP path is taken by default here and it
+# puts a barrier at every compute node. Generation evaluates one small graph per token, so those
+# barriers dominate it: ggml's own pthread pool generates 2.1x to 3.2x faster on the small models
+# and prefill is unaffected. See docs/build-macpro31-perf.md.
 # GGML_METAL=OFF: the Quadro 4000 exposes no Metal device.
 # GGML_ACCELERATE=OFF: the 10.11 Accelerate.h headers do not compile with GCC.
 # GGML_BLAS=OFF: BLAS only serves F32 tensors, so it does nothing for quantized models.
+# LLAMA_USE_PREBUILT_UI=OFF: the embedded Web UI is fetched from a Hugging Face bucket, and the
+# bundle published there has since changed layout, so this checkout fails looking for the
+# bundle[hash].css it expects. Skipping the download still builds llama-server; it just embeds an
+# empty UI.
 cmake -S . -B "$BUILD" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER="$CC_MP" \
     -DCMAKE_CXX_COMPILER="$CXX_MP" \
     -DGGML_NATIVE=ON \
+    -DGGML_OPENMP=OFF \
     -DGGML_METAL=OFF \
     -DGGML_ACCELERATE=OFF \
     -DGGML_BLAS=OFF \
+    -DLLAMA_USE_PREBUILT_UI=OFF \
     -DLLAMA_CURL=OFF
 
 cmake --build "$BUILD" --parallel "$JOBS"
