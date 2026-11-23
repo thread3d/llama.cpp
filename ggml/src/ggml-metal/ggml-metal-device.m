@@ -2016,6 +2016,18 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         }
     }
 
+    // f8_e4m3 and nvfp4 were added upstream after this backend's fork point and have no Metal
+    // kernels here; decline them (as inputs or result) so the scheduler falls back to the CPU
+    // instead of dereferencing a missing pipeline.
+    if (op->type == GGML_TYPE_F8_E4M3 || op->type == GGML_TYPE_NVFP4) {
+        return false;
+    }
+    for (int i = 0; i < GGML_MAX_SRC; ++i) {
+        if (op->src[i] != NULL && (op->src[i]->type == GGML_TYPE_F8_E4M3 || op->src[i]->type == GGML_TYPE_NVFP4)) {
+            return false;
+        }
+    }
+
     switch (op->op) {
         case GGML_OP_SCALE:
         case GGML_OP_FILL:
@@ -2117,8 +2129,15 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_ACC:
             return ggml_is_contiguous_rows(op->src[0]) && ggml_is_contiguous_rows(op->src[1]) && op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_REPEAT:
+            return op->src[0]->type == GGML_TYPE_F32 ||
+                   op->src[0]->type == GGML_TYPE_F16 ||
+                   op->src[0]->type == GGML_TYPE_I16 ||
+                   op->src[0]->type == GGML_TYPE_I32 ||
+                   (op->src[0]->type == GGML_TYPE_BF16 && has_bfloat);
         case GGML_OP_CONV_TRANSPOSE_1D:
-            return true;
+            return (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_F32) &&
+                   op->src[1]->type == GGML_TYPE_F32 &&
+                   op->type == GGML_TYPE_F32;
         case GGML_OP_CONV_TRANSPOSE_2D:
             return ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]) &&
                 (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_F32) &&
@@ -2136,19 +2155,25 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                    op->src[1]->type == GGML_TYPE_F32;
         case GGML_OP_SUM:
             // wave64: nsg and shmem are sized by the real width, so the reduction is width-agnostic.
-            return (has_simdgroup_reduction || wave64_decode) && ggml_is_contiguous(op->src[0]);
+            return (has_simdgroup_reduction || wave64_decode) && ggml_is_contiguous(op->src[0]) &&
+                   op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_TRI:
-            return ggml_is_contiguous_rows(op->src[0]);
+            return ggml_is_contiguous_rows(op->src[0]) &&
+                   (op->src[0]->type == GGML_TYPE_F32 ||
+                    op->src[0]->type == GGML_TYPE_F16 ||
+                    (op->src[0]->type == GGML_TYPE_BF16 && has_bfloat));
         case GGML_OP_SOFT_MAX:
             // wave64: soft_max is now width-agnostic, so allow it on GPU behind the decode opt-in.
-            return (has_simdgroup_reduction || wave64_decode) && ggml_is_contiguous_rows(op->src[0]);
+            return (has_simdgroup_reduction || wave64_decode) && ggml_is_contiguous_rows(op->src[0]) &&
+                   (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16);
         case GGML_OP_SUM_ROWS:
         case GGML_OP_CUMSUM:
         case GGML_OP_MEAN:
         case GGML_OP_GROUP_NORM:
         case GGML_OP_L2_NORM:
             // wave64: width-agnostic kernels (real-width shmem and lane indexing).
-            return (has_simdgroup_reduction || wave64_decode) && ggml_is_contiguous_rows(op->src[0]);
+            return (has_simdgroup_reduction || wave64_decode) && ggml_is_contiguous_rows(op->src[0]) &&
+                   op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_COUNT_EQUAL:
             return (has_simdgroup_reduction || wave64_decode) &&
                 op->src[0]->type == GGML_TYPE_I32 &&
@@ -2156,15 +2181,18 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 op->type == GGML_TYPE_I64;
         case GGML_OP_ARGMAX:
             // wave64: shmem is sized and split by the real width instead of N_SIMDWIDTH.
-            return has_simdgroup_reduction || wave64_decode;
+            return (has_simdgroup_reduction || wave64_decode) && op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_NORM:
         case GGML_OP_RMS_NORM:
             // wave64: norm/rms_norm kernels are width-agnostic (simd_sum + shmem sized by
             // the real width), so allow them on GPU behind the decode opt-in.
-            return (has_simdgroup_reduction || wave64_decode) && (ggml_is_contiguous_rows(op->src[0]));
+            return (has_simdgroup_reduction || wave64_decode) && (ggml_is_contiguous_rows(op->src[0])) &&
+                   op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_ROPE:
         case GGML_OP_ROPE_BACK:
-            return true;
+            // the rope kernels exist for f16/f32 only
+            return (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_F32) &&
+                   (op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_F32);
         case GGML_OP_IM2COL:
             return ggml_is_contiguous(op->src[1]) && op->src[1]->type == GGML_TYPE_F32 && (op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_F32);
         case GGML_OP_CONV_2D:
@@ -2202,6 +2230,11 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_ROLL:
             return ggml_is_contiguous(op->src[0]);
         case GGML_OP_FLASH_ATTN_EXT:
+            // kv_rows (unified/multi-seq KV, upstream after this backend's fork point) selects
+            // rows per q slice and is not implemented here: decline it and let the CPU run it
+            if (op->src[5] != NULL) {
+                return false;
+            }
             // for new head sizes, add checks here
             if (op->src[0]->ne[0] != 32 &&
                 op->src[0]->ne[0] != 40 &&
@@ -2385,7 +2418,18 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_SOLVE_TRI:
             return has_simdgroup_reduction && op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_MUL_MAT: {
-            if (op->src[0]->type == GGML_TYPE_NVFP4 || ggml_metal_type_is_ternary(op->src[0]->type)) {
+            // f8_e4m3 and nvfp4 have no kernel in this (ToshLLM) backend: decline them so the
+            // scheduler falls back to the CPU instead of dereferencing a missing pipeline
+            if (op->src[0]->type == GGML_TYPE_NVFP4 || op->src[0]->type == GGML_TYPE_F8_E4M3 ||
+                ggml_metal_type_is_ternary(op->src[0]->type)) {
+                return false;
+            }
+            // the mat-mul/mat-vec kernels are instantiated only for f32 activations
+            if (op->src[1]->type != GGML_TYPE_F32) {
+                return false;
+            }
+            // the mat-mul/mat-vec kernels are instantiated only for f32 activations
+            if (op->src[1]->type != GGML_TYPE_F32) {
                 return false;
             }
             if (has_simdgroup_reduction) {
@@ -2431,7 +2475,10 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
             return prefill || decode;
         }
         case GGML_OP_MUL_MAT_ID: {
-            if (op->src[0]->type == GGML_TYPE_NVFP4 || ggml_metal_type_is_ternary(op->src[0]->type)) {
+            // f8_e4m3 and nvfp4 have no kernel in this (ToshLLM) backend: decline them so the
+            // scheduler falls back to the CPU instead of dereferencing a missing pipeline
+            if (op->src[0]->type == GGML_TYPE_NVFP4 || op->src[0]->type == GGML_TYPE_F8_E4M3 ||
+                ggml_metal_type_is_ternary(op->src[0]->type)) {
                 return false;
             }
             if (has_simdgroup_reduction) {

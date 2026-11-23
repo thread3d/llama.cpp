@@ -122,7 +122,7 @@ ggml_tensor * llama_model_eagle3::graph<true>::build_inp_embd_enc() const {
 // Input: target_features e.g. [12288, n_tokens] from target model layers low, middle, high
 // Output: g_embeddings e.g. [4096, n_tokens] stored in context
 template <>
-llama_model_eagle3::graph<true>::graph(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
+llama_model_eagle3::graph<true>::graph(const llm_graph_params & params) : llm_graph_context(params) {
     ggml_tensor * cur = nullptr;
 
     cur = build_inp_embd_enc();
@@ -149,7 +149,7 @@ llama_model_eagle3::graph<true>::graph(const llama_model & model, const llm_grap
 // Input: draft tokens + g_embeddings from encoder
 // Output: draft logits
 template <>
-llama_model_eagle3::graph<false>::graph(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
+llama_model_eagle3::graph<false>::graph(const llm_graph_params & params) : llm_graph_context(params) {
     const int64_t n_embd_head = hparams.n_embd_head_v();
 
     GGML_ASSERT(n_embd_head == hparams.n_embd_head_k());
@@ -162,14 +162,12 @@ llama_model_eagle3::graph<false>::graph(const llama_model & model, const llm_gra
     // 1. Token embeddings (e.g.from eagle3's own tok_embd for Llama 3.3 70B, or target model for Llama 3.1 8B)
     // 2. g_embeddings from encoder
     auto * tok_embd = model.tok_embd;
-    const llama_hadamard_rotations * embd_inverses = nullptr;
     if (model.tok_embd == nullptr) {
         GGML_ASSERT(cparams.ctx_other != nullptr);
         const auto * model_other = llama_get_model(cparams.ctx_other);
 
         GGML_ASSERT(model_other->tok_embd != nullptr && "EAGLE3 decoder requires token embeddings (own or from target model)");
         tok_embd = model_other->tok_embd;
-        embd_inverses = &model_other->hadamard_inverses;
     }
 
     auto inp = std::make_unique<llm_graph_input_embd>(n_embd);
@@ -181,7 +179,6 @@ llama_model_eagle3::graph<false>::graph(const llama_model & model, const llm_gra
     ggml_set_input(inp->embd);
 
     ggml_tensor * inp_embd = ggml_get_rows(ctx0, tok_embd, inp->tokens);
-    inp_embd = build_hadamard_lookup(tok_embd, inp_embd, embd_inverses);
     cb(inp_embd, "inp_embd", -1);
 
     ggml_tensor * inp_g = inp->embd;
@@ -237,20 +234,9 @@ llama_model_eagle3::graph<false>::graph(const llama_model & model, const llm_gra
         Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
         Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
 
-        // rope freq factors, returns nullptr if not available
-        ggml_tensor * rope_factors = model.get_rope_factors(cparams, il);
-
         // RoPE
-        Qcur = ggml_rope_ext(
-                ctx0, Qcur, inp_pos, rope_factors,
-                n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                ext_factor, attn_factor, beta_fast, beta_slow
-                );
-        Kcur = ggml_rope_ext(
-                ctx0, Kcur, inp_pos, rope_factors,
-                n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                ext_factor, attn_factor, beta_fast, beta_slow
-                );
+        Qcur = build_rope(Qcur, inp_pos, il);
+        Kcur = build_rope(Kcur, inp_pos, il);
 
         cb(Qcur, "Qcur_rope", il);
         cb(Kcur, "Kcur_rope", il);
@@ -304,7 +290,6 @@ llama_model_eagle3::graph<false>::graph(const llama_model & model, const llm_gra
 
         GGML_ASSERT(model_other->output != nullptr && "EAGLE3 decoder requires an output projection (own or from target model)");
         output = model_other->output;
-        cur = build_hadamard_input(output, cur, &model_other->hadamard_rotations);
     }
     cur = build_lora_mm(output, cur);
 
@@ -325,17 +310,15 @@ llama_model_eagle3::graph<false>::graph(const llama_model & model, const llm_gra
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;
-
-    ggml_build_forward_expand(gf, cur);
 }
 
 std::unique_ptr<llm_graph_context> llama_model_eagle3::build_arch_graph(const llm_graph_params & params) const {
     switch (params.gtype) {
         case LLM_GRAPH_TYPE_ENCODER:
-            return std::make_unique<graph<true>>(*this, params);
+            return std::make_unique<graph<true>>(params);
         case LLM_GRAPH_TYPE_DEFAULT:
         case LLM_GRAPH_TYPE_DECODER:
-            return std::make_unique<graph<false>>(*this, params);
+            return std::make_unique<graph<false>>(params);
         default:
             GGML_ABORT("invalid graph type");
     };
