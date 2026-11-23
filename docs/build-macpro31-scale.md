@@ -49,10 +49,10 @@ situation are in that document; this one reports measurements.
   19.85 GB) are not part of the six-model comparison: they were measured with the same build,
   threads and gate, but with `MODELS_DIR` pointing at a directory holding only those two, so they
   could be added without repeating the twelve files the main sweep had already measured.
-- **A second full sweep was run at 4 threads**, same seed, same schedule and same build, so the two
-  datasets differ only in the thread count. 7 threads remains the baseline everywhere in this
-  document; the comparison is in "What four threads change" below, and its records are the
-  `macpro31/bench-*-4t.jsonl` files.
+- **Two further full sweeps were run, at 6 and 4 threads**, same seed, same schedule and same
+  build, so the datasets differ only in the thread count. 7 threads remains the baseline everywhere
+  in this document; the comparison is in "What thread count changes" below, and the records are the
+  `macpro31/bench-*-6t.jsonl` and `macpro31/bench-*-4t.jsonl` files.
 
 ## Throughput against model size
 
@@ -146,50 +146,69 @@ are what is on the disk.
 `stories260K` is a 1.1 MB toy model included because it is on the disk; its numbers only show that
 the harness itself has no fixed overhead worth worrying about.
 
-## What four threads change
+## What thread count changes
 
-The whole sweep was repeated at `THREADS=4` — same seed, same randomized schedule, same build — so
-the two datasets differ in exactly one number. Raw records: `macpro31/bench-*-4t.jsonl`.
+The sweep was repeated at 6 and at 4 threads — same seed, same randomized schedule, same build — so
+the datasets differ in exactly one number. Raw records: `macpro31/bench-*-6t.jsonl` and
+`macpro31/bench-*-4t.jsonl`.
 
-![Throughput at 7 and 4 threads](macpro31/threads-throughput.svg)
+![Throughput at 7, 6 and 4 threads](macpro31/threads-throughput.svg)
 
-| model | 7t prefill | 4t prefill | 4t/7t | 7t gen | 4t gen | 4t/7t |
+| model | test | 7t | 6t | 4t | 6t/7t | 4t/7t |
 |---|---|---|---|---|---|---|
-| Qwen2.5-0.5B q4_0 | 69.36 | 41.62 | 60% | 16.42 | 15.69 | 96% |
-| Qwen2.5-0.5B q4_K_M | 56.95 | 34.23 | 60% | 14.98 | 12.29 | 82% |
-| Qwen2.5-0.5B q8_0 | 56.05 | 34.02 | 61% | 11.42 | 10.38 | 91% |
-| Qwen2.5-0.5B f16 | 13.36 | 8.17 | 61% | 5.25 | 3.96 | 75% |
-| Llama-3.2-1B q4_K_M | 32.38 | 19.37 | 60% | 7.46 | 5.71 | 77% |
-| Qwen2.5-1.5B q4_0 | 20.21 | 12.18 | 60% | 5.99 | 5.78 | 96% |
-| Qwen2.5-1.5B q4_K_M | 23.04 | 13.71 | 60% | 5.89 | 4.66 | 79% |
-| Qwen2.5-3B q4_K_M | 10.91 | 6.58 | 60% | 3.09 | 2.44 | 79% |
-| Mistral-7B q4_0 | 4.04 | 2.42 | 60% | 1.58 | 1.47 | 93% |
-| Mistral-7B q4_K_M | 4.49 | 2.68 | 60% | 1.46 | 1.15 | 79% |
-| Qwen3-8B q4_K_M | 4.46 | 2.66 | 60% | 1.32 | 1.03 | 78% |
-| Qwen2.5-14B q4_K_M | 2.34 | 1.40 | 60% | 0.74 | 0.57 | 78% |
-| Qwen2.5-32B q4_K_M | 0.98 | 0.58 | 59% | 0.33 | 0.25 | 77% |
+| stories260K | prefill | 18758.50 | 17575.93 | 14255.87 | 94% | 76% |
+| stories260K | generation | 3901.97 | 4259.20 | 4564.33 | 109% | 117% |
+| 0.5B q4_0 | prefill | 69.36 | 61.33 | 41.62 | 88% | 60% |
+| 0.5B q4_0 | generation | 16.42 | 17.76 | 15.69 | 108% | 96% |
+| 0.5B q4_K_M | prefill | 56.95 | 50.51 | 34.23 | 89% | 60% |
+| 0.5B q4_K_M | generation | 14.98 | 15.91 | 12.29 | 106% | 82% |
+| 0.5B q8_0 | prefill | 56.05 | 49.80 | 34.02 | 89% | 61% |
+| 0.5B q8_0 | generation | 11.42 | 12.12 | 10.38 | 106% | 91% |
+| 0.5B f16 | prefill | 13.36 | 11.82 | 8.17 | 88% | 61% |
+| 0.5B f16 | generation | 5.25 | 4.95 | 3.96 | 94% | 75% |
+| 1B q4_K_M | prefill | 32.38 | 28.66 | 19.37 | 89% | 60% |
+| 1B q4_K_M | generation | 7.46 | 7.39 | 5.71 | 99% | 77% |
+| 1.5B q4_0 | prefill | 20.21 | 18.12 | 12.18 | 90% | 60% |
+| 1.5B q4_0 | generation | 5.99 | 6.56 | 5.78 | 109% | 96% |
+| 1.5B q4_K_M | prefill | 23.04 | 20.64 | 13.71 | 90% | 60% |
+| 1.5B q4_K_M | generation | 5.89 | 5.98 | 4.66 | 102% | 79% |
+| 3B q4_K_M | prefill | 10.91 | 9.68 | 6.58 | 89% | 60% |
+| 3B q4_K_M | generation | 3.09 | 3.09 | 2.44 | 100% | 79% |
+| 7B q4_K_M | prefill | 4.49 | 3.94 | 2.68 | 88% | 60% |
+| 7B q4_K_M | generation | 1.46 | 1.41 | 1.15 | 97% | 79% |
+| 7B q4_0 | prefill | 4.04 | 3.57 | 2.42 | 88% | 60% |
+| 7B q4_0 | generation | 1.58 | 1.68 | 1.47 | 106% | 93% |
+| 8B q4_K_M | prefill | 4.46 | 3.95 | 2.66 | 89% | 60% |
+| 8B q4_K_M | generation | 1.32 | 1.31 | 1.03 | 99% | 78% |
+| 14B q4_K_M | prefill | 2.34 | 2.06 | 1.40 | 88% | 60% |
+| 14B q4_K_M | generation | 0.74 | 0.72 | 0.57 | 98% | 78% |
+| 32B q4_K_M | prefill | 0.98 | 0.87 | 0.58 | 88% | 59% |
+| 32B q4_K_M | generation | 0.33 | 0.32 | 0.25 | 97% | 77% |
 
-- **Prefill scales with cores and nothing else.** 59 to 61 percent everywhere, from 0.5B to 32B.
-  That is the thread ratio (4/7 = 57 percent) plus a little less per-thread contention. No
-  model-size dependence at all, which is what "compute bound" means concretely.
-- **Generation loses much less, and only where the format has a vector kernel.** `q4_0` and `q8_0`
-  hold 91 to 96 percent of their 7-thread rate: four threads already put the memory bus close to
-  saturation, so the three extra threads buy almost nothing. `q4_K_M` holds 77 to 82 percent and
-  `f16` 75 percent, so the K-quant kernels do still gain from the extra threads. The format ranking
-  does not collapse to a single winner at 4 threads: on the 0.5B, `q4_0` leads both tests (41.62
-  against 34.23 prefill, 15.69 against 12.29 generation), but on the 1.5B `q4_K_M` keeps the
-  prefill edge (13.71 against 12.18) while `q4_0` generates 24 percent faster (5.78 against 4.66).
-- **Depth costs a little more at 4 threads in both directions.** For Qwen2.5-0.5B the prefill ratio
-  falls from 60 percent at depth 0 to 53 percent at 4096, and generation from 87 to 76 percent: the
-  attention pass over the KV cache is partly compute, so it scales with threads as well.
-- **On a shared desktop this is arguably the better default.** Four threads give up 40 percent of
-  prefill — latency paid once per prompt — and 4 to 25 percent of generation, which is what you
-  actually watch, while leaving four cores for everything else. The 7-thread figures stay the
-  baseline in the rest of this document; this is a comparison, not a replacement.
-- `stories260K` reads 117 percent on generation, which is meaningless: sub-millisecond runs on a
-  1.1 MB toy model.
+- **Prefill scales with the core count and nothing else.** 88 to 90 percent of the 7-thread rate at 6
+  threads and 59 to 61 percent at 4, against thread ratios of 86 and 57 percent. It is flat from
+  0.5B to 32B, which is what "compute bound" means concretely.
+- **Six threads is the sweet spot on this machine.** Generation at 6 threads is 97 to 109 percent of
+  the 7-thread figure: at parity or slightly better almost everywhere, and clearly better on the
+  small `q4_0`/`q8_0` models (106-109 percent). Seven worker threads on eight cores leave almost no
+  slack, so a barrier waits whenever anything else runs; six leaves two cores and the memory-bound
+  generation loop never stalls. You keep 88 percent of prefill and lose no generation at all, while
+  two cores stay free for the desktop.
+- **At 4 threads generation depends on the format, because the memory bus starts to matter.** `q4_0`
+  and `q8_0` hold 91 to 96 percent — four threads already nearly saturate bandwidth — while
+  `q4_K_M` keeps 77 to 82 percent and `f16` 75 percent. The K-quant kernels do still gain from extra
+  threads.
+- **Depth costs a little more at fewer threads.** For Qwen2.5-0.5B the prefill ratio falls from 60
+  percent of the 7-thread rate at depth 0 to 53 percent at 4096, and generation from 87 to 76
+  percent: the attention pass over the KV cache is partly compute, so it tracks the thread count
+  too.
+- `stories260K` reads 109 and 117 percent on generation, which is meaningless: sub-millisecond runs
+  on a 1.1 MB toy model.
+- The 7-thread figures stay the baseline in the rest of this document. This section is a comparison,
+  not a replacement; `build-macpro31-perf.md` explains the 8-thread collapse that makes 8 the one
+  count to avoid.
 
-## What the numbers say
+## What the numbers say## What the numbers say
 
 - **Prompt processing delivers a nearly constant number of operations per second.** Throughput
   falls from 56.9 to 4.45 tokens/s across a 13x range of model size, and the product with two
@@ -249,11 +268,13 @@ MODELS_DIR=~/models-large THREADS=7 scripts/bench-macpro31.sh coverage   # the 1
 python3 scripts/plot-macpro31-coverage.py \
     docs/macpro31/bench-coverage.jsonl docs/macpro31/bench-coverage-xl.jsonl docs/macpro31
 
-# the same sweep at 4 threads, then the comparison
+# the same sweep at 6 and at 4 threads, then the comparison
+MODELS_DIR=~/models THREADS=6 OUT=~/bench-macpro31-t6.jsonl scripts/bench-macpro31.sh all
 MODELS_DIR=~/models THREADS=4 OUT=~/bench-macpro31-t4.jsonl scripts/bench-macpro31.sh all
 python3 scripts/plot-macpro31-threads.py docs/macpro31 \
-    docs/macpro31/bench-coverage.jsonl docs/macpro31/bench-coverage-xl.jsonl \
-    -- docs/macpro31/bench-coverage-4t.jsonl
+    7t=docs/macpro31/bench-coverage.jsonl,docs/macpro31/bench-coverage-xl.jsonl \
+    6t=docs/macpro31/bench-coverage-6t.jsonl \
+    4t=docs/macpro31/bench-coverage-4t.jsonl
 ```
 
 `bench-macpro31.sh` needs `MODELS_DIR` to hold the GGUF files it names. It is resumable: runs
