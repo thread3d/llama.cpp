@@ -184,7 +184,7 @@ static size_t llama_tensor_group_size(size_t n_devs) {
 }
 
 // returns true on success
-static bool llama_prepare_model_devices(const llama_model_params & params, llama_model * model) {
+static bool llama_prepare_model_devices(const llama_model_params & params, llama_model * model, size_t model_size) {
     // create list of devices to use with this model
     if (params.devices) {
         if (params.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
@@ -351,6 +351,62 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
         }
     }
 
+    // Auto-fit: with several GPUs available, spreading a model that fits in fewer of them
+    // costs a cross-device hand-off per layer per token and is slower. Keep the smallest
+    // number of GPUs whose free VRAM can hold the model (one when it fits), best-first.
+    // An explicit device list (--device, params.devices, GGML_METAL_DEVICE_LIST) or
+    // LLAMA_SPLIT_MULTI_FORCE=1 keeps the requested devices instead.
+    if (params.split_mode == LLAMA_SPLIT_MODE_LAYER && params.devices == nullptr &&
+        model->devices.size() > 1 && model_size > 0 &&
+        getenv("GGML_METAL_DEVICE_LIST") == nullptr &&
+        getenv("LLAMA_SPLIT_MULTI_FORCE") == nullptr) {
+        // 25% headroom for the KV cache and compute buffers
+        const size_t need = model_size + model_size/4;
+
+        struct dev_free {
+            size_t idx;
+            size_t free;
+        };
+        std::vector<dev_free> by_free;
+        bool have_free = true;
+        for (size_t i = 0; i < model->devices.size(); ++i) {
+            ggml_backend_dev_props props;
+            ggml_backend_dev_get_props(model->devices[i].dev, &props);
+            if (props.memory_free == 0) {
+                have_free = false;
+            }
+            by_free.push_back({i, props.memory_free});
+        }
+        std::stable_sort(by_free.begin(), by_free.end(), [](const dev_free & a, const dev_free & b) {
+            return a.free > b.free;
+        });
+
+        if (have_free) {
+            size_t sum = 0;
+            size_t keep = 0;
+            for (; keep < by_free.size() && sum < need; ++keep) {
+                sum += by_free[keep].free;
+            }
+
+            if (keep < by_free.size()) {
+                std::vector<bool> use(model->devices.size(), false);
+                for (size_t i = 0; i < keep; ++i) {
+                    use[by_free[i].idx] = true;
+                }
+                std::vector<llama_device> kept;
+                for (size_t i = 0; i < model->devices.size(); ++i) {
+                    if (use[i]) {
+                        kept.push_back(model->devices[i]);
+                    }
+                }
+                model->devices = std::move(kept);
+
+                LLAMA_LOG_INFO("%s: model needs %.2f GiB, fits in %zu GPU(s) - using %zu (LLAMA_SPLIT_MULTI_FORCE=1 to spread)\n",
+                        __func__, need/1024.0/1024.0/1024.0, by_free.size(), model->devices.size());
+            }
+        }
+    }
+
     for (const auto & dev : model->devices) {
         ggml_backend_dev_props props;
         ggml_backend_dev_get_props(dev.dev, &props);
@@ -375,7 +431,7 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
         ml.print_info();
         std::unique_ptr<llama_model> model_ptr(llama_model_create(ml, params));
 
-        bool ok = llama_prepare_model_devices(params, model_ptr.get());
+        bool ok = llama_prepare_model_devices(params, model_ptr.get(), ml.n_bytes);
         if (!ok) {
             return {-1, nullptr};
         }

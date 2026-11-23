@@ -44,10 +44,10 @@ tokens a second** on a Radeon PRO W6800X Duo.
 > and [LICENSE-GPL-3.0.txt](LICENSE-GPL-3.0.txt). Details in
 > [Licensing and provenance](docs/build-macos-amd.md#licensing-and-provenance).
 
-**All discrete GPUs are used by default** (layer split across e.g. both W6800X dies and a
-Vega II). Pin a single GPU with `GGML_METAL_DEVICE_INDEX=N`, or list the ones to use with
-`GGML_METAL_DEVICE_LIST=a,b`. For models that already fit in one GPU, one GPU is usually
-faster than layer-splitting; multi-GPU is for models that do not fit.
+**The build uses the fewest GPUs the model fits in.** A model that fits one GPU runs on one
+(no per-token cross-device hand-off, so it is faster); larger models are spread over as many
+as needed. Force spreading with `LLAMA_SPLIT_MULTI_FORCE=1`, or choose devices explicitly
+with `GGML_METAL_DEVICE_INDEX=N` / `GGML_METAL_DEVICE_LIST=a,b`.
 
 ## Quick start
 

@@ -79,11 +79,13 @@ itself; a raw `llama-cli`/`llama-server` invocation does not. Without it the AMD
 attention kernels stay disabled and generation collapses. On a gemma-4-26B-A4B this
 is the difference between 16 t/s and 75 t/s.
 
-By default every discrete Metal GPU is registered and the model is layer-split across
-all of them; the cross-device hand-off uses shared events unless disabled.
+By default every discrete Metal GPU is registered, and the model is layer-split across the
+fewest of them that can hold it: one GPU when it fits (faster, no per-token cross-device
+hand-off), all of them when it does not. The cross-device hand-off uses shared events
+unless disabled.
 
 ```sh
-# all GPUs (default)
+# automatically: one GPU when the model fits, otherwise as many as needed (default)
 TOSH_FA_AMD=1 ./build-amd/bin/llama-server \
     -m model.gguf -ngl 99 -fa auto -t 14 -c 4096 --port 8080
 
@@ -91,8 +93,12 @@ TOSH_FA_AMD=1 ./build-amd/bin/llama-server \
 TOSH_FA_AMD=1 GGML_METAL_DEVICE_INDEX=2 ./build-amd/bin/llama-server \
     -m model.gguf -ngl 99 -fa auto -t 14 -c 4096 --port 8080
 
-# explicit subset / order
+# explicit subset / order (never auto-fitted to fewer devices)
 TOSH_FA_AMD=1 GGML_METAL_DEVICE_LIST=0,1 ./build-amd/bin/llama-server \
+    -m model.gguf -ngl 99 -fa auto -t 14 -c 4096 --split-mode layer --port 8080
+
+# force spreading a model that would otherwise fit in one GPU
+TOSH_FA_AMD=1 LLAMA_SPLIT_MULTI_FORCE=1 ./build-amd/bin/llama-server \
     -m model.gguf -ngl 99 -fa auto -t 14 -c 4096 --split-mode layer --port 8080
 ```
 
@@ -105,6 +111,7 @@ TOSH_FA_AMD=1 GGML_METAL_DEVICE_LIST=0,1 ./build-amd/bin/llama-server \
 | `GGML_METAL_DEVICES=N` | register `N` discrete GPUs (`1` restores single-GPU default) |
 | `GGML_METAL_DEVICE_LIST=a,b` | register the listed GPUs; slot `i` maps to physical `list[i]` |
 | `TOSH_MGPU_EVENTS=0` | disable the event-based cross-device hand-off (on by default) |
+| `LLAMA_SPLIT_MULTI_FORCE=1` | do not auto-fit to fewer GPUs; spread over all/selected devices |
 | `TOSH_MGPU_PEER=1` | peer-direct transfers where the cards allow it |
 | `GGML_METAL_CONCURRENCY_ENABLE=1` | force concurrent encoders back on (only correct on unified memory) |
 | `GGML_METAL_MM_MANUAL_DISABLE=1` | fall back to the matrix-vector prefill path |
@@ -115,10 +122,11 @@ TOSH_FA_AMD=1 GGML_METAL_DEVICE_LIST=0,1 ./build-amd/bin/llama-server \
 
 ### Multi-GPU and `n_cpu_moe`
 
-All discrete GPUs are used by default (`--split-mode layer`). For models that fit in a
-single GPU, pinning one GPU (`GGML_METAL_DEVICE_INDEX=N`) is often faster: layer
+By default the model is placed on the fewest GPUs that can hold it (`--split-mode layer`
+over the selected devices), so a model that fits one card stays on one card: layer
 splitting adds a cross-device hand-off per token, which only pays off once the model no
-longer fits one card. `-ncmoe` (`--n-cpu-moe`) keeps the
+longer fits one card. Use `LLAMA_SPLIT_MULTI_FORCE=1` to spread anyway. `-ncmoe`
+(`--n-cpu-moe`) keeps the
 experts of the first N layers on the host; it is what makes a model larger than the
 available VRAM fit at all. It is not a tuning knob to leave unset. For the models in
 this repository:
