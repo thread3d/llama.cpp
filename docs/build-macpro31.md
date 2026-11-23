@@ -99,7 +99,8 @@ Binaries land in `build-macpro31-cpu/bin`.
 ## Measured throughput
 
 This section covers models up to 1.5B and contexts up to 1024 tokens. The larger sweep, up to 32B
-and contexts up to 4096, is in [`build-macpro31-scale.md`](build-macpro31-scale.md).
+across nine architectures and contexts up to 4096, is in
+[`build-macpro31-scale.md`](build-macpro31-scale.md).
 
 Every number comes from `scripts/bench-macpro31.sh`, which is committed so the sweep can be
 repeated. The raw llama-bench records are in `docs/macpro31/bench-context.jsonl`,
@@ -111,9 +112,10 @@ charts and `docs/macpro31/results.csv`.
 - `llama-bench`, CPU backend, **7 threads**, batch and ubatch at their defaults, Flash Attention
   `auto`.
 - **Why 7 and not 8.** Eight worker threads on eight cores leaves no headroom for the rest of the
-  system, and generation collapses: on this machine 0.5B q4_K_M measures 15.0 tokens/s at 7
+  system, and generation collapses: on this machine 0.5B q4_K_M measures about 15 tokens/s at 7
   threads and 3.3 at 8, with the same build and the same model, reproducibly. 7 threads leaves one
-  core free and matches the A/B figures in `build-macpro31-perf.md`. Every table here is 7 threads.
+  core free; 6 leaves two and is now the recommended default, at 88 percent of the prefill and no
+  loss of generation. The full 4/6/7 series is in `build-macpro31-scale.md`.
 - A prompt processing test is 128 tokens, a token generation test is 32 tokens.
 - Context depth is swept with `-d`: llama-bench fills the context with that many tokens first, then
   runs the test. It builds the context once for the prompt test and again for the generation test,
@@ -135,15 +137,15 @@ charts and `docs/macpro31/results.csv`.
 
 | model | depth | n | tokens/s | sd |
 |---|---|---|---|---|
-| Qwen2.5-0.5B q4_K_M | 0 | 4 | 57.46 | 0.30 |
-| Qwen2.5-0.5B q4_K_M | 256 | 4 | 55.73 | 0.39 |
-| Qwen2.5-0.5B q4_K_M | 1024 | 4 | 51.84 | 0.67 |
-| Llama-3.2-1B q4_K_M | 0 | 4 | 32.37 | 0.09 |
-| Llama-3.2-1B q4_K_M | 256 | 4 | 31.41 | 0.03 |
-| Llama-3.2-1B q4_K_M | 1024 | 4 | 28.81 | 0.04 |
-| Qwen2.5-1.5B q4_K_M | 0 | 4 | 23.01 | 0.04 |
-| Qwen2.5-1.5B q4_K_M | 256 | 4 | 21.96 | 0.35 |
-| Qwen2.5-1.5B q4_K_M | 1024 | 4 | 20.09 | 0.10 |
+| Qwen2.5-0.5B q4_K_M | 0 | 4 | 58.11 | 1.02 |
+| Qwen2.5-0.5B q4_K_M | 256 | 4 | 57.23 | 0.25 |
+| Qwen2.5-0.5B q4_K_M | 1024 | 4 | 53.33 | 0.87 |
+| Llama-3.2-1B q4_K_M | 0 | 4 | 32.58 | 0.42 |
+| Llama-3.2-1B q4_K_M | 256 | 4 | 31.74 | 0.48 |
+| Llama-3.2-1B q4_K_M | 1024 | 4 | 29.02 | 0.46 |
+| Qwen2.5-1.5B q4_K_M | 0 | 4 | 23.47 | 0.31 |
+| Qwen2.5-1.5B q4_K_M | 256 | 4 | 22.58 | 0.32 |
+| Qwen2.5-1.5B q4_K_M | 1024 | 4 | 20.54 | 0.30 |
 
 ### Token generation against context depth
 
@@ -151,15 +153,15 @@ charts and `docs/macpro31/results.csv`.
 
 | model | depth | n | tokens/s | sd |
 |---|---|---|---|---|
-| Qwen2.5-0.5B q4_K_M | 0 | 4 | 15.24 | 0.08 |
-| Qwen2.5-0.5B q4_K_M | 256 | 4 | 13.71 | 0.18 |
-| Qwen2.5-0.5B q4_K_M | 1024 | 4 | 11.54 | 0.52 |
-| Llama-3.2-1B q4_K_M | 0 | 4 | 7.41 | 0.08 |
-| Llama-3.2-1B q4_K_M | 256 | 4 | 6.90 | 0.05 |
-| Llama-3.2-1B q4_K_M | 1024 | 4 | 6.14 | 0.01 |
-| Qwen2.5-1.5B q4_K_M | 0 | 4 | 5.86 | 0.02 |
-| Qwen2.5-1.5B q4_K_M | 256 | 4 | 5.30 | 0.18 |
-| Qwen2.5-1.5B q4_K_M | 1024 | 4 | 4.77 | 0.08 |
+| Qwen2.5-0.5B q4_K_M | 0 | 4 | 15.92 | 0.58 |
+| Qwen2.5-0.5B q4_K_M | 256 | 4 | 14.59 | 0.15 |
+| Qwen2.5-0.5B q4_K_M | 1024 | 4 | 12.70 | 0.40 |
+| Llama-3.2-1B q4_K_M | 0 | 4 | 7.64 | 0.26 |
+| Llama-3.2-1B q4_K_M | 256 | 4 | 7.05 | 0.22 |
+| Llama-3.2-1B q4_K_M | 1024 | 4 | 6.34 | 0.21 |
+| Qwen2.5-1.5B q4_K_M | 0 | 4 | 6.15 | 0.22 |
+| Qwen2.5-1.5B q4_K_M | 256 | 4 | 5.75 | 0.15 |
+| Qwen2.5-1.5B q4_K_M | 1024 | 4 | 5.09 | 0.15 |
 
 ### Quantization at depth 0
 
@@ -169,14 +171,14 @@ All four are the same Qwen2.5-0.5B model, so this isolates the quantization form
 
 | quantization | test | n | tokens/s | sd |
 |---|---|---|---|---|
-| q4_0 | prompt | 4 | 69.74 | 0.71 |
-| q4_0 | generation | 4 | 16.22 | 0.66 |
-| q4_K_M | prompt | 4 | 57.58 | 0.19 |
-| q4_K_M | generation | 4 | 15.18 | 0.22 |
-| q8_0 | prompt | 4 | 55.81 | 0.41 |
-| q8_0 | generation | 4 | 11.48 | 0.04 |
-| f16 | prompt | 4 | 13.36 | 0.04 |
-| f16 | generation | 4 | 5.15 | 0.09 |
+| q4_0 | prompt | 4 | 70.59 | 1.29 |
+| q4_0 | generation | 4 | 16.96 | 0.58 |
+| q4_K_M | prompt | 4 | 57.38 | 2.33 |
+| q4_K_M | generation | 4 | 15.38 | 1.26 |
+| q8_0 | prompt | 4 | 56.68 | 1.47 |
+| q8_0 | generation | 4 | 11.69 | 0.44 |
+| f16 | prompt | 4 | 13.48 | 0.24 |
+| f16 | generation | 4 | 5.41 | 0.13 |
 
 ### Throughput against model size
 
@@ -184,31 +186,31 @@ All four are the same Qwen2.5-0.5B model, so this isolates the quantization form
 
 ## What the numbers say
 
-- **Prompt processing is now compute bound at a much higher rate.** Q4_K_M gives 56.9, 32.4 and
-  23.0 tokens/s for 0.63B, 1.24B and 1.78B, which is 72, 80 and 82 GFLOP/s effective (two
-  operations per parameter). Before the SSSE3 kernels the same sweep worked out to about 21-26
-  GFLOP/s: the K-quant formats were running scalar reference code, so the vector unit sat idle.
+- **Prompt processing is now compute bound at a much higher rate.** Q4_K_M gives 58.5, 32.7 and
+  23.3 tokens/s for 0.63B, 1.24B and 1.78B, which is 74, 81 and 83 GFLOP/s effective (two operations
+  per parameter). Before the SSSE3 kernels the same sweep worked out to about 21-26 GFLOP/s: the
+  K-quant formats were running scalar reference code, so the vector unit sat idle.
 - **Generation is bandwidth bound and now at the memory ceiling.** 0.5B, 1B and 1.5B generate at
-  15.2, 7.4 and 5.9 tokens/s. With 0.49, 0.80 and 1.11 GB of weights those are 7.3, 6.0 and
-  6.5 GB/s read, against 7.14 GB/s measured for this machine with an 8-thread streaming probe: 84
-  to 102 percent of it. There is no headroom left; generation cannot be made faster without a
-  faster memory system.
-- **Context costs both, and generation more.** From depth 0 to 1024, generation retains 76, 83 and
-  82 percent on the three models, while prompt processing retains 90, 89 and 87 percent. The
-  attention pass reads the KV cache on every generated token and that read grows with the
-  context, so the cost lands on generation.
+  15.9, 7.6 and 6.2 tokens/s. With 0.49, 0.80 and 1.11 GB of weights those are 7.8, 6.1 and
+  6.9 GB/s read, against 7.14 GB/s measured for this machine with an 8-thread streaming probe. There
+  is no headroom left; generation cannot be made faster without a faster memory system.
+- **Context costs both, and generation more.** From depth 0 to 1024, generation retains 80, 83 and
+  83 percent on the three models, while prompt processing retains 92, 89 and 88 percent. The
+  attention pass reads the KV cache on every generated token and that read grows with the context,
+  so the cost lands on generation.
 - **The old 4.4x advantage of Q4_0 over Q4_K_M is gone.** It was an artifact of `q4_K_M` having no
-  vector kernel on a CPU without AVX2. With kernels for both, q4_0 leads q4_K_M by 21 percent on
-  prefill (69.7 against 57.6) and 7 percent on generation (16.2 against 15.2). Q4_K_M remains the
+  vector kernel on a CPU without AVX2. With kernels for both, q4_0 leads q4_K_M by 23 percent on
+  prefill (70.6 against 57.4) and 10 percent on generation (17.0 against 15.4). Q4_K_M remains the
   better quality per byte, and on this machine it is no longer a throughput penalty.
-- **f16 is now the slow choice**, at 13.4 tokens/s prefill and 5.2 generation: four times the
-  bytes per weight of a 4-bit format, and no integer dot-product path to exploit.
-- **Practical advice for this machine:** the 0.5B is the model this CPU can hold a conversation
-  with (12-15 tokens/s generation, 52-57 prefill), the 1.5B is usable in batch or with patience
-  (4.8-5.9 generation, 20-23 prefill), and anything larger belongs to the batch section of
-  [`build-macpro31-scale.md`](build-macpro31-scale.md).
+- **f16 is now the slow choice**, at 13.5 tokens/s prefill and 5.4 generation: four times the bytes
+  per weight of a 4-bit format, and no integer dot-product path to exploit.
+- **Practical advice for this machine:** the 0.5B is the model this CPU can hold a conversation with
+  (12-17 tokens/s generation, 53-58 prefill), the 1.5B is usable in batch or with patience (5.1-6.2
+  generation, 21-23 prefill), and anything larger belongs to the batch section of
+  [`build-macpro31-scale.md`](build-macpro31-scale.md). On a machine that is somebody's desktop,
+  `-t 6` is the better default: 88 percent of this prefill and no loss of generation.
 
-## Reproducing the numbers
+## Reproducing the numbers## Reproducing the numbers
 
 ```
 scripts/build-macpro31.sh

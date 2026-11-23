@@ -132,10 +132,11 @@ benchmark documents report 7-thread numbers. An 8-thread measurement taken with 
 
 A whole second and third sweep — every model up to 32B, every depth — were also run at 6 and at 4
 threads. The comparison is in `build-macpro31-scale.md` under "What thread count changes": prefill
-lands at 88-90 percent of the 7-thread rate at 6 threads and 59-61 percent at 4, flat across model
-size (compute bound), while generation is 97-109 percent at 6 threads and 75-96 percent at 4
-depending on the format (bandwidth bound). Six threads is therefore the sweet spot on a machine
-that is somebody's desktop: no generation loss, 88 percent of the prefill, two free cores.
+lands at 86-89 percent of the 7-thread rate at 6 threads and 59-61 percent at 4 (the latter on the
+earlier 14-model set), flat across model size and architecture (compute bound), while generation is
+94-107 percent at 6 threads and 75-96 percent at 4 depending on the format (bandwidth bound). Six
+threads is therefore the sweet spot on a machine that is somebody's desktop: no generation loss, 88
+percent of the prefill, two free cores.
 
 ## 3. What the memory system can actually deliver
 
