@@ -2,8 +2,10 @@
 
 Second sweep on the same machine as `docs/build-macpro31.md`: six models from 0.5B to 8B at
 context depths up to 4096 tokens, plus one pass over every GGUF file on the machine, which includes
-two larger models (14B and 32B) added for this exercise. Build, portability fixes and the GPU
-situation are in that document; this one reports measurements.
+two larger models (14B and 32B) plus eight from other vendors added for this exercise — Microsoft
+Phi-3.5, IBM granite, Google gemma-2, AllenAI OLMo-2, Cohere aya, TII Falcon3, HuggingFace SmolLM2 and
+a DeepSeek R1 distill — for 22 GGUF files in total. Build, portability fixes and the GPU situation are
+in that document; this one reports measurements.
 
 ## Hardware
 
@@ -119,34 +121,57 @@ model's own depth-0 figure.
 
 ## Every model file on the machine
 
-`scripts/bench-macpro31.sh coverage` walks every `*.gguf` in `MODELS_DIR` at depth 0, so the chart
-and table below answer "how does each file actually run" rather than following the six-model
-comparison above. The duplicates that differ only in quantization are included on purpose: they
-are what is on the disk.
+`scripts/bench-macpro31.sh coverage` walks every `*.gguf` in `MODELS_DIR` at depth 0, so the chart and
+table below answer "how does each file actually run" rather than following the six-model comparison
+above. The duplicates that differ only in quantization are included on purpose: they are what is on
+the disk. This is the `bench-coverage-r7.jsonl` measurement: 7 threads, 22 files, 3 runs each.
 
 ![Throughput of every model file](macpro31/coverage-throughput.svg)
 
 | model | prompt t/s | sd | generation t/s | sd |
 |---|---|---|---|---|
-| Qwen2.5-0.5B q4_K_M | 56.95 | 1.01 | 14.98 | 0.61 |
-| Qwen2.5-0.5B q4_0 | 69.36 | 0.91 | 16.42 | 0.44 |
-| Qwen2.5-0.5B q8_0 | 56.05 | 0.82 | 11.42 | 0.31 |
-| Qwen2.5-0.5B f16 | 13.36 | 0.07 | 5.25 | 0.03 |
-| Llama-3.2-1B q4_K_M | 32.38 | 0.02 | 7.46 | 0.00 |
-| Qwen2.5-1.5B q4_K_M | 23.04 | 0.05 | 5.89 | 0.02 |
-| Qwen2.5-1.5B q4_0 | 20.21 | 0.06 | 5.99 | 0.07 |
-| Qwen2.5-3B q4_K_M | 10.91 | 0.01 | 3.09 | 0.01 |
-| Mistral-7B q4_K_M | 4.49 | 0.00 | 1.46 | 0.00 |
-| Mistral-7B q4_0 | 4.04 | 0.00 | 1.58 | 0.00 |
-| Qwen3-8B q4_K_M | 4.46 | 0.00 | 1.32 | 0.00 |
-| Qwen2.5-14B q4_K_M | 2.34 | 0.01 | 0.74 | 0.00 |
-| Qwen2.5-32B q4_K_M | 0.98 | 0.00 | 0.33 | 0.00 |
-| stories260K (toy) | 18758.50 | 681.55 | 3901.97 | 279.39 |
+| stories260K (toy) | 18690.30 | 410.91 | 3849.94 | 315.68 |
+| Qwen2.5-0.5B f16 | 13.52 | 0.27 | 5.44 | 0.16 |
+| Qwen2.5-0.5B q4_0 | 70.29 | 1.19 | 16.70 | 0.73 |
+| Qwen2.5-0.5B q4_K_M | 57.95 | 0.99 | 15.63 | 0.61 |
+| Qwen2.5-0.5B q8_0 | 56.34 | 0.74 | 11.45 | 0.26 |
+| Llama-3.2-1B q4_K_M | 32.51 | 0.46 | 7.61 | 0.23 |
+| SmolLM2-1.7B (llama) | 19.13 | 0.36 | 5.66 | 0.23 |
+| R1-Distill-Qwen-1.5B | 23.29 | 0.53 | 6.12 | 0.24 |
+| Qwen2.5-1.5B q4_0 | 20.42 | 0.31 | 6.15 | 0.23 |
+| Qwen2.5-1.5B q4_K_M | 23.35 | 0.36 | 6.10 | 0.18 |
+| granite-3.1-2b | 12.69 | 0.19 | 3.89 | 0.14 |
+| gemma-2-2b-it | 15.10 | 0.24 | 3.48 | 0.12 |
+| Falcon3-3B | 13.06 | 0.09 | 3.54 | 0.07 |
+| Qwen2.5-3B q4_K_M | 10.96 | 0.19 | 3.16 | 0.10 |
+| Phi-3.5-mini | 4.94 | 0.08 | 2.48 | 0.06 |
+| Mistral-7B q4_0 | 4.07 | 0.10 | 1.61 | 0.07 |
+| Mistral-7B q4_K_M | 4.52 | 0.06 | 1.47 | 0.04 |
+| OLMo-2-7B | 4.83 | 0.09 | 1.50 | 0.04 |
+| aya-expanse-8b | 4.49 | 0.07 | 1.25 | 0.04 |
+| Qwen3-8B q4_K_M | 4.47 | 0.08 | 1.34 | 0.04 |
+| Qwen2.5-14B q4_K_M | 2.35 | 0.04 | 0.75 | 0.02 |
+| Qwen2.5-32B q4_K_M | 0.99 | 0.02 | 0.34 | 0.01 |
 
-`stories260K` is a 1.1 MB toy model included because it is on the disk; its numbers only show that
-the harness itself has no fixed overhead worth worrying about.
+`stories260K` is a 1.1 MB toy model included because it is on the disk; its numbers only show that the
+harness itself has no fixed overhead worth worrying about.
 
-## What thread count changes
+- **Every architecture on the disk loads and runs.** The set now spans `llama` (Llama-3.2, SmolLM2,
+  Mistral), `qwen2`/`qwen3` (Qwen, DeepSeek R1 distill), `phi3` (Microsoft Phi-3.5), `granite` (IBM),
+  `gemma2` (Google), `olmo2` (AllenAI), `command-r` (Cohere aya) and `falcon` (TII), and none needed a
+  build change. That is a compatibility result as much as a speed one: this CPU has SSE4.1 and no AVX,
+  so every path taken here is scalar or SSE code.
+- **Generation is uniformly at the memory ceiling.** Reading every weight once per token gives 5.9 to
+  7.1 GB/s across all 22 files, whatever the family. Throughput is set by file size and nothing else,
+  which is why a 1.7B SmolLM2 and a 1.7B Qwen2.5 land within 8 percent of each other.
+- **Prefill usually lands in the 65 to 82 GFLOP/s band, and two architectures fall short of it.**
+  Phi-3.5-mini manages 2 x 3.8B x 4.94 = 37 GFLOP/s, and granite-3.1-2b about 51. Qwen, Llama,
+  Gemma-2, OLMo-2, Falcon3, SmolLM2 and aya all sit in the band. Same CPU, same quantization, same
+  threads, so the shortfall is the model's graph and kernel layout rather than the machine.
+- **Practical read**: the 0.5B to 1.5B models are interactive (5.7 to 16.7 tokens/s generation), the
+  3B class is marginal, and everything from 7B up is batch-only.
+
+## What thread count changes## What thread count changes
 
 The sweep was repeated at 6 and at 4 threads — same seed, same randomized schedule, same build — so
 the datasets differ in exactly one number. Raw records: `macpro31/bench-*-6t.jsonl` and

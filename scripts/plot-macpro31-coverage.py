@@ -41,6 +41,14 @@ LABELS = {
     "stories260K.gguf": "stories260K (toy)",
     "Qwen2.5-14B-Instruct-Q4_K_M.gguf": "Qwen2.5-14B q4_K_M",
     "Qwen2.5-32B-Instruct-Q4_K_M.gguf": "Qwen2.5-32B q4_K_M",
+    "Phi-3.5-mini-instruct-Q4_K_M.gguf": "Phi-3.5-mini",
+    "granite-3.1-2b-instruct-Q4_K_M.gguf": "granite-3.1-2b",
+    "gemma-2-2b-it-Q4_K_M.gguf": "gemma-2-2b-it",
+    "OLMo-2-1124-7B-Instruct-Q4_K_M.gguf": "OLMo-2-7B",
+    "aya-expanse-8b-Q4_K_M.gguf": "aya-expanse-8b",
+    "Falcon3-3B-Instruct-Q4_K_M.gguf": "Falcon3-3B",
+    "smollm2-1.7b-instruct-q4_k_m.gguf": "SmolLM2-1.7B",
+    "DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf": "R1-Distill-Qwen-1.5B",
 }
 
 
