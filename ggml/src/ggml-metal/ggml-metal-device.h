@@ -330,6 +330,9 @@ void ggml_metal_event_encode_signal(ggml_metal_event_t ev, ggml_metal_cmd_buf_t 
 void ggml_metal_event_encode_wait  (ggml_metal_event_t ev, ggml_metal_cmd_buf_t cmd_buf);
 
 ggml_metal_device_t ggml_metal_device_init(int device, int n_devices);
+
+// number of discrete GPUs Metal reports (0 if none); used to default to "use all GPUs"
+int ggml_metal_device_discrete_count(void);
 void ggml_metal_device_free(ggml_metal_device_t dev);
 
 ggml_metal_device_t ggml_metal_device_get(int device, int n_devices);

@@ -79,14 +79,20 @@ itself; a raw `llama-cli`/`llama-server` invocation does not. Without it the AMD
 attention kernels stay disabled and generation collapses. On a gemma-4-26B-A4B this
 is the difference between 16 t/s and 75 t/s.
 
+By default every discrete Metal GPU is registered and the model is layer-split across
+all of them; the cross-device hand-off uses shared events unless disabled.
+
 ```sh
-# one GPU
+# all GPUs (default)
 TOSH_FA_AMD=1 ./build-amd/bin/llama-server \
     -m model.gguf -ngl 99 -fa auto -t 14 -c 4096 --port 8080
 
-# all GPUs
-TOSH_FA_AMD=1 GGML_METAL_DEVICE_LIST=0,1,2 TOSH_MGPU_EVENTS=1 \
-    ./build-amd/bin/llama-server \
+# pin one GPU, e.g. the Vega II
+TOSH_FA_AMD=1 GGML_METAL_DEVICE_INDEX=2 ./build-amd/bin/llama-server \
+    -m model.gguf -ngl 99 -fa auto -t 14 -c 4096 --port 8080
+
+# explicit subset / order
+TOSH_FA_AMD=1 GGML_METAL_DEVICE_LIST=0,1 ./build-amd/bin/llama-server \
     -m model.gguf -ngl 99 -fa auto -t 14 -c 4096 --split-mode layer --port 8080
 ```
 
@@ -95,9 +101,10 @@ TOSH_FA_AMD=1 GGML_METAL_DEVICE_LIST=0,1,2 TOSH_MGPU_EVENTS=1 \
 | Variable | Effect |
 |---|---|
 | `TOSH_FA_AMD` | enable the AMD attention kernels. **Required on AMD** |
-| `GGML_METAL_DEVICE_INDEX=N` | use physical GPU `N` only |
+| `GGML_METAL_DEVICE_INDEX=N` | use physical GPU `N` only (opt out of all-GPU default) |
+| `GGML_METAL_DEVICES=N` | register `N` discrete GPUs (`1` restores single-GPU default) |
 | `GGML_METAL_DEVICE_LIST=a,b` | register the listed GPUs; slot `i` maps to physical `list[i]` |
-| `TOSH_MGPU_EVENTS=1` | event-based cross-device synchronisation; use with `DEVICE_LIST` |
+| `TOSH_MGPU_EVENTS=0` | disable the event-based cross-device hand-off (on by default) |
 | `TOSH_MGPU_PEER=1` | peer-direct transfers where the cards allow it |
 | `GGML_METAL_CONCURRENCY_ENABLE=1` | force concurrent encoders back on (only correct on unified memory) |
 | `GGML_METAL_MM_MANUAL_DISABLE=1` | fall back to the matrix-vector prefill path |
@@ -108,7 +115,10 @@ TOSH_FA_AMD=1 GGML_METAL_DEVICE_LIST=0,1,2 TOSH_MGPU_EVENTS=1 \
 
 ### Multi-GPU and `n_cpu_moe`
 
-Use `--split-mode layer` with more than one device. `-ncmoe` (`--n-cpu-moe`) keeps the
+All discrete GPUs are used by default (`--split-mode layer`). For models that fit in a
+single GPU, pinning one GPU (`GGML_METAL_DEVICE_INDEX=N`) is often faster: layer
+splitting adds a cross-device hand-off per token, which only pays off once the model no
+longer fits one card. `-ncmoe` (`--n-cpu-moe`) keeps the
 experts of the first N layers on the host; it is what makes a model larger than the
 available VRAM fit at all. It is not a tuning knob to leave unset. For the models in
 this repository:

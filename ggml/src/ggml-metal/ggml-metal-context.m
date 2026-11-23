@@ -1881,7 +1881,9 @@ bool ggml_metal_cpy_tensor_async_ex(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, 
         static int use_events = -1;
         if (use_events < 0) {
             const char * v = getenv("TOSH_MGPU_EVENTS");
-            use_events = (v && v[0] == '1') ? 1 : 0;
+            // on by default: with several GPUs registered (the default now) this is the fast
+            // cross-device hand-off; opt out with TOSH_MGPU_EVENTS=0
+            use_events = (v && v[0] == '0') ? 0 : 1;
         }
         // Infinity Fabric peer copy is opt-in until validated on bridged hardware:
         // a success that silently returns wrong data has no fallback.

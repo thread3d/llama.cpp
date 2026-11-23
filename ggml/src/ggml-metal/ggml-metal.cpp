@@ -1668,6 +1668,15 @@ ggml_backend_reg_t ggml_backend_metal_reg(void) {
             }
         }
 
+        // default to every discrete GPU, so a plain `-ngl` run uses all of them.
+        // Opt out with GGML_METAL_DEVICE_INDEX=N (one GPU) or GGML_METAL_DEVICES=1.
+        if (env == NULL && !(env_list && *env_list) && getenv("GGML_METAL_DEVICE_INDEX") == NULL) {
+            const int n_discrete = ggml_metal_device_discrete_count();
+            if (n_discrete > 0) {
+                g_devices = n_discrete;
+            }
+        }
+
         static std::vector<ggml_backend_device_ptr> devs;
 
         if (!initialized) {

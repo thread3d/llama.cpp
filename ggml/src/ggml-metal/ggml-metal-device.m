@@ -1175,6 +1175,20 @@ static id<MTLDevice> ggml_metal_device_default_discrete(void) {
 }
 
 
+int ggml_metal_device_discrete_count(void) {
+    @autoreleasepool {
+        NSArray<id<MTLDevice>> * all = MTLCopyAllDevices();
+        int n = 0;
+        for (id<MTLDevice> d in all) {
+            if (!d.isLowPower) {
+                ++n;
+            }
+        }
+        [all release];
+        return n;
+    }
+}
+
 static id<MTLCommandQueue> ggml_metal_new_queue(id<MTLDevice> device) {
     const char * s = getenv("TOSH_MTL_QUEUE_DEPTH");
     const int depth = s ? atoi(s) : 0;
@@ -1230,7 +1244,11 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
             const char * env_idx  = getenv("GGML_METAL_DEVICE_INDEX");
             const char * env_num  = getenv("GGML_METAL_DEVICES");
             const char * env_list = getenv("GGML_METAL_DEVICE_LIST");
-            const int    num_dev = env_num ? atoi(env_num) : 1;
+            // with no pin/list the registry registers every discrete GPU (see
+            // ggml_backend_metal_reg): map slot -> i-th discrete GPU so a plain run uses
+            // all of them, and keep the old single-GPU behaviour for GGML_METAL_DEVICE_INDEX
+            const bool   auto_all = env_idx == NULL && env_num == NULL && env_list == NULL;
+            const int    num_dev  = n_devices > 0 ? n_devices : 1;
             if (env_idx != NULL || num_dev > 1 || env_list != NULL) {
                 const int base = env_idx ? atoi(env_idx) : 0;
                 int phys = base + device;
@@ -1245,7 +1263,7 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
                     }
                 }
                 NSArray<id<MTLDevice>> * all = MTLCopyAllDevices();
-                if (env_list == NULL && env_idx == NULL && num_dev > 1) {
+                if (env_list == NULL && env_idx == NULL && (num_dev > 1 || auto_all)) {
                     // DEVICES=K without index/list: slot i -> i-th discrete GPU;
                     // raw index when there aren't enough discrete devices.
                     int found = -1;

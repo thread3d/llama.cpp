@@ -43,7 +43,11 @@ tokens a second** on a Radeon PRO W6800X Duo.
 > whole under the GNU General Public License, version 3 or later - see [NOTICE](NOTICE)
 > and [LICENSE-GPL-3.0.txt](LICENSE-GPL-3.0.txt). Details in
 > [Licensing and provenance](docs/build-macos-amd.md#licensing-and-provenance).
->>>>>>> theirs
+
+**All discrete GPUs are used by default** (layer split across e.g. both W6800X dies and a
+Vega II). Pin a single GPU with `GGML_METAL_DEVICE_INDEX=N`, or list the ones to use with
+`GGML_METAL_DEVICE_LIST=a,b`. For models that already fit in one GPU, one GPU is usually
+faster than layer-splitting; multi-GPU is for models that do not fit.
 
 ## Quick start
 
