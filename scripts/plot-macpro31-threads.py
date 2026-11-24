@@ -88,7 +88,8 @@ def main():
     base_label, base = sets[0]
     order = sorted(meta, key=lambda le: (meta[le][0] or 0))
 
-    fig, axes = plt.subplots(1, 2, figsize=(10.8, 5.6), sharey=True)
+    height = max(5.6, 0.30 * len(order) + 2.2)
+    fig, axes = plt.subplots(1, 2, figsize=(10.8, height), sharey=True)
     for ax, (kind, title) in zip(axes, (("prompt", "Prompt processing (128 tokens)"),
                                         ("generation", "Token generation (32 tokens)"))):
         ys = list(range(len(order)))

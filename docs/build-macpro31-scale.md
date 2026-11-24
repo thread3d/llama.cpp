@@ -44,9 +44,9 @@ measurements.
   states which depths it covers.
 - The depth-0 baseline for the deeper points comes from the size sweep, which measures the same
   models at depth 0 with 4 runs.
-- **The whole suite was re-run at other thread counts.** 6 and 4 threads were measured in full, and
-  5, 3, 2 and 1 followed; those records are `macpro31/bench-*-6t.jsonl` and so on. 7 threads remains
-  the baseline here, and the comparison is in "What thread count changes" below.
+- **The whole suite was re-run at other thread counts.** 6, 5, 4, 3, 2 and 1 threads are measured in
+  full; those records are `macpro31/bench-*-6t.jsonl` and so on. 7 threads remains the baseline here,
+  and the comparison is in "What thread count changes" below.
 
 ## Throughput against model size
 
@@ -165,49 +165,59 @@ the harness itself has no fixed overhead worth worrying about.
 
 ## What thread count changes
 
-The whole suite was re-run at 6, 5, 4, 3, 2 and 1 threads. The 7- and 6-thread 22-model datasets are
-committed (`bench-coverage.jsonl` and `bench-coverage-6t.jsonl`); the lower counts were still running
-when this section was written, so only those two are tabulated here.
+The whole suite was re-run at 6, 5, 4, 3, 2 and 1 threads over the same 22-model set. Seven, six,
+five, four and three are committed (`bench-coverage.jsonl` and `bench-coverage-{6,5,4,3}t.jsonl`);
+two and one were still running when this was written.
 
-![Throughput at 7 and 6 threads](macpro31/threads-throughput.svg)
+![Throughput at 7, 6, 5, 4 and 3 threads](macpro31/threads-throughput.svg)
 
-| model | 7t prefill | 6t prefill | 6t/7t | 7t gen | 6t gen | 6t/7t |
+Across the 21 real models (the toy is excluded), as a percentage of the 7-thread rate:
+
+| threads | prefill median | prefill range | generation median | generation range | thread ratio |
+|---|---|---|---|---|---|
+| 6 | 88.0% | 85.7-88.9% | 98.1% | 93.9-106.9% | 85.7% |
+| 5 | 73.8% | 72.7-74.9% | 89.2% | 83.5-104.2% | 71.4% |
+| 4 | 59.7% | 58.9-60.8% | 78.3% | 72.4-102.6% | 57.1% |
+| 3 | 45.0% | 44.4-46.3% | 63.8% | 57.3-83.2% | 42.9% |
+
+Representative absolute figures, tokens/s:
+
+| model | test | 7t | 6t | 5t | 4t | 3t |
 |---|---|---|---|---|---|---|
-| Qwen2.5-0.5B q4_0 | 70.29 | 61.39 | 87% | 16.70 | 17.64 | 106% |
-| Qwen2.5-0.5B q4_K_M | 57.95 | 49.65 | 86% | 15.63 | 15.59 | 100% |
-| Qwen2.5-0.5B q8_0 | 56.34 | 49.34 | 88% | 11.45 | 11.94 | 104% |
-| Qwen2.5-0.5B f16 | 13.52 | 11.91 | 88% | 5.44 | 5.11 | 94% |
-| Llama-3.2-1B | 32.51 | 28.58 | 88% | 7.61 | 7.43 | 98% |
-| SmolLM2-1.7B | 19.13 | 16.93 | 88% | 5.66 | 5.67 | 100% |
-| R1-Distill-Qwen-1.5B | 23.29 | 20.62 | 89% | 6.12 | 5.99 | 98% |
-| Qwen2.5-1.5B q4_0 | 20.42 | 18.12 | 89% | 6.15 | 6.58 | 107% |
-| Qwen2.5-1.5B q4_K_M | 23.35 | 20.64 | 88% | 6.10 | 6.01 | 99% |
-| granite-3.1-2b | 12.69 | 11.17 | 88% | 3.89 | 3.87 | 99% |
-| gemma-2-2b-it | 15.10 | 13.42 | 89% | 3.48 | 3.42 | 98% |
-| Falcon3-3B | 13.06 | 11.45 | 88% | 3.54 | 3.41 | 96% |
-| Qwen2.5-3B | 10.96 | 9.69 | 88% | 3.16 | 3.10 | 98% |
-| Phi-3.5-mini | 4.94 | 4.34 | 88% | 2.48 | 2.37 | 96% |
-| Mistral-7B q4_0 | 4.07 | 3.58 | 88% | 1.61 | 1.69 | 105% |
-| Mistral-7B q4_K_M | 4.52 | 3.97 | 88% | 1.47 | 1.44 | 98% |
-| OLMo-2-7B | 4.83 | 4.22 | 87% | 1.50 | 1.44 | 97% |
-| aya-expanse-8b | 4.49 | 3.96 | 88% | 1.25 | 1.22 | 98% |
-| Qwen3-8B | 4.47 | 3.95 | 88% | 1.34 | 1.29 | 96% |
-| Qwen2.5-14B | 2.35 | 2.08 | 88% | 0.75 | 0.73 | 98% |
-| Qwen2.5-32B | 0.99 | 0.87 | 88% | 0.34 | 0.32 | 96% |
+| Qwen2.5-0.5B q4_0 | prefill | 70.29 | 61.39 | 51.63 | 42.13 | 31.81 |
+| Qwen2.5-0.5B q4_0 | generation | 16.70 | 17.64 | 17.07 | 17.14 | 13.89 |
+| Qwen2.5-0.5B q4_K_M | prefill | 57.95 | 49.65 | 42.57 | 34.34 | 26.01 |
+| Qwen2.5-0.5B q4_K_M | generation | 15.63 | 15.59 | 14.67 | 13.05 | 10.72 |
+| Qwen2.5-3B | prefill | 10.96 | 9.69 | 8.15 | 6.62 | 4.96 |
+| Qwen2.5-3B | generation | 3.16 | 3.10 | 2.84 | 2.48 | 2.03 |
+| Phi-3.5-mini | prefill | 4.94 | 4.34 | 3.62 | 2.92 | 2.19 |
+| Phi-3.5-mini | generation | 2.48 | 2.37 | 2.10 | 1.80 | 1.42 |
+| Qwen3-8B | prefill | 4.47 | 3.95 | 3.31 | 2.68 | 2.01 |
+| Qwen3-8B | generation | 1.34 | 1.29 | 1.20 | 1.04 | 0.85 |
+| Qwen2.5-32B | prefill | 0.99 | 0.87 | 0.73 | 0.59 | 0.44 |
+| Qwen2.5-32B | generation | 0.34 | 0.32 | 0.30 | 0.26 | 0.21 |
 
-- **Prefill scales with the core count and nothing else.** 86 to 89 percent of the 7-thread rate at 6
-  threads, flat from 0.5B to 32B and across every architecture. That is the thread ratio (6/7 = 86
-  percent) plus a little less per-thread contention.
-- **Six threads gives generation at parity or better.** 94 to 107 percent, median about 98: the extra
-  core of slack stops the barrier from stalling, and the small `q4_0`/`q8_0` models actually gain.
-  Seven worker threads on eight cores leaves almost nothing spare.
-- **The format effect is visible in the spread.** The formats whose kernels saturate memory early
-  (`q4_0`, `q8_0`) gain the most from having a spare core; `f16` loses the most (94 percent), because
-  its bytes-per-token cost keeps growing with thread count rather than being bandwidth-saturated.
-- The counts below 6 (5, 4, 3, 2, 1) are measured and will be added to this section when the series
-  finishes; the 4-thread comparison published earlier was on the 14-model set and is superseded.
+- **Prefill tracks the thread count, and beats it slightly.** The medians sit 1-2 points above the
+  thread ratio at every count (88.0 against 85.7, 73.8 against 71.4, 59.7 against 57.1, 45.0 against
+  42.9), and the spread across 21 models and nine architectures is under 1.5 points in every case.
+  That is what a purely compute-bound test looks like: the only variable is how many cores are
+  working, with less per-thread contention as the count falls.
+- **Generation is sublinear because it is bandwidth bound.** 98.1, 89.2, 78.3 and 63.8 percent at 6, 5,
+  4 and 3 threads. Those four numbers sit close to `sqrt(threads / 7)` (0.926, 0.845, 0.756, 0.655),
+  which is the shape you would expect from a memory system that saturates before the cores do. The
+  practical consequence is that the first few threads taken away cost almost nothing and the last
+  ones cost a lot: going 7 to 6 loses 2 percent of generation, going 3 to 2 loses far more.
+- **The spread in generation is the format effect, not noise.** At 4 threads the range is 72 to 103
+  percent: `q4_0` (17.14 against 16.70 at 7 threads, i.e. no loss at all) and `q8_0` keep almost
+  everything because four threads already saturate memory for them, while `f16` falls to 74 percent
+  and keeps falling (60 percent at 3 threads). Formats that need more bandwidth to sustain a token
+  lose more when cores go away.
+- **Six threads is the sweet spot on a machine that is somebody's desktop.** Generation at 98 percent
+  of the 7-thread rate for the loss of 12 percent of prefill, and two cores left for the desktop. The
+  8-thread collapse documented in `build-macpro31-perf.md` is why "one more than 6" is not an option.
+- The 2- and 1-thread counts will be added to this table when their runs finish.
 
-## What the numbers say
+## What the numbers say## What the numbers say
 
 - **Prompt processing delivers a nearly constant number of operations per second.** Throughput
   falls from 58.5 to 4.49 tokens/s across a 13x range of model size, and the product with two
