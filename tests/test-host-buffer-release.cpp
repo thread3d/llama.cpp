@@ -33,6 +33,14 @@ static bool test_release(ggml_backend_buffer_type_t buft) {
 }
 
 int main() {
+    // TASK_VM_INFO leaves phys_footprint at zero on Darwin 15 (OS X 10.11): the kernel does not
+    // populate the field, so the release assertion below cannot be evaluated. Skip instead of
+    // reporting a failure that is impossible to measure on this platform.
+    if (phys_footprint() == 0) {
+        printf("SKIP: phys_footprint is not populated on this kernel (Darwin 15)\n");
+        return 77;
+    }
+
     ggml_backend_load_all();
 
     bool ok = test_release(ggml_backend_cpu_buffer_type());

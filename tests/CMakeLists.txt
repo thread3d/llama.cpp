@@ -386,6 +386,7 @@ llama_build_and_test(test-backend-sampler.cpp   LABEL "model behavior backend")
 if (APPLE)
     llama_build(test-rset-release.cpp)
     llama_build_and_test(test-host-buffer-release.cpp LINK ggml)
+    set_tests_properties(test-host-buffer-release PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 if (NOT GGML_BACKEND_DL AND GGML_CPU)

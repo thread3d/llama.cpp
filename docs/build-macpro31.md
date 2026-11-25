@@ -4,7 +4,7 @@ This branch makes llama.cpp build and run on a Mac Pro 3,1 with OS X 10.11.6 El 
 CPU backend. GPU acceleration is not possible on this machine; the evidence is below, and the
 measured throughput of the CPU backend is at the end.
 
-The numbers here are from the kernel build (Section "Changes in this branch") at **7 threads**. The
+The numbers here are from build 12743 (`57654b8`, upstream `abca6920`) at **7 threads**. The
 one-paragraph reason for 7 and not 8 is under "Measured throughput"; the full argument, with the
 measurements, is in [`build-macpro31-perf.md`](build-macpro31-perf.md).
 
@@ -89,12 +89,28 @@ Binaries land in `build-macpro31-cpu/bin`.
 
 ## Verification on this machine
 
-- `test-quantize-fns`, `test-gguf` (101/101), `test-sampling` and `test-tiled-mulmat` pass.
-  `test-tiled-mulmat` reports `max_err: 0.000000` for every quantized type, including the new
-  `q4_K` path, so the SSSE3 kernels agree with the reference implementation.
+The branch tip (`57654b8`, llama.cpp build 12743, upstream `abca6920`) was verified with the full
+CTest suite and the build script's own checks:
+
+- `ctest`: **71 of 74 tests pass**, one is skipped and two cannot run on this OS.
+- `scripts/build-macpro31.sh check` (`test-quantize-fns`, `test-gguf`, `test-sampling`,
+  `test-tiled-mulmat`) passes. `test-tiled-mulmat` reports `max_err: 0.000000` for every quantized
+  type, including the `q4_K` path, so the SSSE3 kernels still agree with the reference after the
+  upstream merge.
 - `test-backend-ops` skips the CPU backend by design and therefore proves nothing here.
-- Greedy generation with Qwen2.5-0.5B-Instruct Q4_K_M answers `The capital of France is Paris.`
-- The HTTP server answers `/health` with `{"status":"ok"}` and returns a correct completion.
+- **Skipped:** `test-host-buffer-release` measures `phys_footprint` with `task_info(TASK_VM_INFO)`
+  before and after freeing a 256 MiB buffer. Darwin 15 does not populate that field (it reports
+  zero), so the test is registered with `SKIP_RETURN_CODE` 77 and skips instead of failing.
+- **Blocked by the platform:** `test-conversion-fp8` and `test-kv-cache-scales` need PyTorch 2.1 or
+  newer for `torch.float8_e4m3fn`. The PyTorch 2.2 wheel fails to load here because `libc10.dylib`
+  needs a newer `/usr/lib/libc++.1.dylib` than El Capitan has; PyTorch 1.13.1 imports but predates
+  the float8 dtype.
+- **Python version matters.** Several tests run Python scripts, and `scripts/chat_tts_norm.py` uses
+  `tuple[int, ...]`. Python 3.8 stops with `TypeError: 'type' object is not subscriptable`, so the
+  suite was run with Homebrew Python 3.9.1 and jinja2 3.1.4; with Python 3.8, `test-jinja-py` fails
+  52 assertions purely on that import.
+- The four models added to the sweep (Qwen2.5-32B Q6_K, gemma-2-27B Q6_K, Qwen2.5-14B Q8_0,
+  Mistral-7B Q8_0) each load and run; the 25 GiB 32B file fits in this machine's 32 GiB.
 
 ## Measured throughput
 
@@ -104,13 +120,13 @@ across nine architectures and contexts up to 4096, is in
 
 Every number comes from `scripts/bench-macpro31.sh`, which is committed so the sweep can be
 repeated. The raw llama-bench records are in `docs/macpro31/bench-context.jsonl`,
-`bench-quant.jsonl` and `bench-coverage.jsonl`; `scripts/plot-macpro31.py` turns them into the
+`bench-quant.jsonl` and `bench-wide-7t.jsonl`; `scripts/plot-macpro31.py` turns them into the
 charts and `docs/macpro31/results.csv`.
 
 ### Method
 
 - `llama-bench`, CPU backend, **7 threads**, batch and ubatch at their defaults, Flash Attention
-  `auto`.
+  `auto`. The build is 12743 (`57654b8`, upstream `abca6920`) with GCC 10.2 and `-DGGML_OPENMP=OFF`.
 - **Why 7 and not 8.** Eight worker threads on eight cores leaves no headroom for the rest of the
   system, and generation collapses: on this machine 0.5B q4_K_M measures about 15 tokens/s at 7
   threads and 3.3 at 8, with the same build and the same model, reproducibly. 7 threads leaves one
@@ -137,15 +153,15 @@ charts and `docs/macpro31/results.csv`.
 
 | model | depth | n | tokens/s | sd |
 |---|---|---|---|---|
-| Qwen2.5-0.5B q4_K_M | 0 | 4 | 58.11 | 1.02 |
-| Qwen2.5-0.5B q4_K_M | 256 | 4 | 57.23 | 0.25 |
-| Qwen2.5-0.5B q4_K_M | 1024 | 4 | 53.33 | 0.87 |
-| Llama-3.2-1B q4_K_M | 0 | 4 | 32.58 | 0.42 |
-| Llama-3.2-1B q4_K_M | 256 | 4 | 31.74 | 0.48 |
-| Llama-3.2-1B q4_K_M | 1024 | 4 | 29.02 | 0.46 |
-| Qwen2.5-1.5B q4_K_M | 0 | 4 | 23.47 | 0.31 |
-| Qwen2.5-1.5B q4_K_M | 256 | 4 | 22.58 | 0.32 |
-| Qwen2.5-1.5B q4_K_M | 1024 | 4 | 20.54 | 0.30 |
+| Qwen2.5-0.5B q4_K_M | 0 | 4 | 58.50 | 0.63 |
+| Qwen2.5-0.5B q4_K_M | 256 | 4 | 56.60 | 0.64 |
+| Qwen2.5-0.5B q4_K_M | 1024 | 4 | 53.11 | 0.78 |
+| Llama-3.2-1B q4_K_M | 0 | 4 | 33.08 | 0.06 |
+| Llama-3.2-1B q4_K_M | 256 | 4 | 31.90 | 0.35 |
+| Llama-3.2-1B q4_K_M | 1024 | 4 | 29.15 | 0.35 |
+| Qwen2.5-1.5B q4_K_M | 0 | 4 | 23.51 | 0.13 |
+| Qwen2.5-1.5B q4_K_M | 256 | 4 | 22.71 | 0.14 |
+| Qwen2.5-1.5B q4_K_M | 1024 | 4 | 20.53 | 0.27 |
 
 ### Token generation against context depth
 
@@ -153,15 +169,15 @@ charts and `docs/macpro31/results.csv`.
 
 | model | depth | n | tokens/s | sd |
 |---|---|---|---|---|
-| Qwen2.5-0.5B q4_K_M | 0 | 4 | 15.92 | 0.58 |
-| Qwen2.5-0.5B q4_K_M | 256 | 4 | 14.59 | 0.15 |
-| Qwen2.5-0.5B q4_K_M | 1024 | 4 | 12.70 | 0.40 |
-| Llama-3.2-1B q4_K_M | 0 | 4 | 7.64 | 0.26 |
-| Llama-3.2-1B q4_K_M | 256 | 4 | 7.05 | 0.22 |
-| Llama-3.2-1B q4_K_M | 1024 | 4 | 6.34 | 0.21 |
-| Qwen2.5-1.5B q4_K_M | 0 | 4 | 6.15 | 0.22 |
-| Qwen2.5-1.5B q4_K_M | 256 | 4 | 5.75 | 0.15 |
-| Qwen2.5-1.5B q4_K_M | 1024 | 4 | 5.09 | 0.15 |
+| Qwen2.5-0.5B q4_K_M | 0 | 4 | 16.00 | 0.45 |
+| Qwen2.5-0.5B q4_K_M | 256 | 4 | 14.22 | 0.46 |
+| Qwen2.5-0.5B q4_K_M | 1024 | 4 | 12.59 | 0.35 |
+| Llama-3.2-1B q4_K_M | 0 | 4 | 7.80 | 0.07 |
+| Llama-3.2-1B q4_K_M | 256 | 4 | 7.17 | 0.19 |
+| Llama-3.2-1B q4_K_M | 1024 | 4 | 6.41 | 0.25 |
+| Qwen2.5-1.5B q4_K_M | 0 | 4 | 6.11 | 0.26 |
+| Qwen2.5-1.5B q4_K_M | 256 | 4 | 5.79 | 0.14 |
+| Qwen2.5-1.5B q4_K_M | 1024 | 4 | 5.21 | 0.05 |
 
 ### Quantization at depth 0
 
@@ -171,14 +187,14 @@ All four are the same Qwen2.5-0.5B model, so this isolates the quantization form
 
 | quantization | test | n | tokens/s | sd |
 |---|---|---|---|---|
-| q4_0 | prompt | 4 | 70.59 | 1.29 |
-| q4_0 | generation | 4 | 16.96 | 0.58 |
-| q4_K_M | prompt | 4 | 57.38 | 2.33 |
-| q4_K_M | generation | 4 | 15.38 | 1.26 |
-| q8_0 | prompt | 4 | 56.68 | 1.47 |
-| q8_0 | generation | 4 | 11.69 | 0.44 |
-| f16 | prompt | 4 | 13.48 | 0.24 |
-| f16 | generation | 4 | 5.41 | 0.13 |
+| q4_0 | prompt | 4 | 70.88 | 0.44 |
+| q4_0 | generation | 4 | 17.41 | 0.15 |
+| q4_K_M | prompt | 4 | 58.38 | 0.74 |
+| q4_K_M | generation | 4 | 15.87 | 0.59 |
+| q8_0 | prompt | 4 | 57.42 | 0.87 |
+| q8_0 | generation | 4 | 12.11 | 0.18 |
+| f16 | prompt | 4 | 13.53 | 0.23 |
+| f16 | generation | 4 | 5.48 | 0.03 |
 
 ### Throughput against model size
 
@@ -186,21 +202,21 @@ All four are the same Qwen2.5-0.5B model, so this isolates the quantization form
 
 ## What the numbers say
 
-- **Prompt processing is now compute bound at a much higher rate.** Q4_K_M gives 58.5, 32.7 and
-  23.3 tokens/s for 0.63B, 1.24B and 1.78B, which is 74, 81 and 83 GFLOP/s effective (two operations
-  per parameter). Before the SSSE3 kernels the same sweep worked out to about 21-26 GFLOP/s: the
+- **Prompt processing is now compute bound at a much higher rate.** Q4_K_M gives 58.4, 33.1 and
+  23.5 tokens/s for 0.63B, 1.24B and 1.78B, which is 73.6, 81.7 and 83.5 GFLOP/s effective (two
+  operations per parameter). Before the SSSE3 kernels the same sweep worked out to about 21-26 GFLOP/s: the
   K-quant formats were running scalar reference code, so the vector unit sat idle.
 - **Generation is bandwidth bound and now at the memory ceiling.** 0.5B, 1B and 1.5B generate at
-  15.9, 7.6 and 6.2 tokens/s. With 0.49, 0.80 and 1.11 GB of weights those are 7.8, 6.1 and
-  6.9 GB/s read, against 7.14 GB/s measured for this machine with an 8-thread streaming probe. There
+  15.8, 7.8 and 6.2 tokens/s. With 0.49, 0.80 and 1.11 GB of weights those are 7.7, 6.3 and
+  6.8 GB/s read, against 7.14 GB/s measured for this machine with an 8-thread streaming probe. There
   is no headroom left; generation cannot be made faster without a faster memory system.
-- **Context costs both, and generation more.** From depth 0 to 1024, generation retains 80, 83 and
-  83 percent on the three models, while prompt processing retains 92, 89 and 88 percent. The
+- **Context costs both, and generation more.** From depth 0 to 1024, generation retains 80, 82 and
+  83 percent on the three models, while prompt processing retains 91, 89 and 87 percent. The
   attention pass reads the KV cache on every generated token and that read grows with the context,
   so the cost lands on generation.
 - **The old 4.4x advantage of Q4_0 over Q4_K_M is gone.** It was an artifact of `q4_K_M` having no
-  vector kernel on a CPU without AVX2. With kernels for both, q4_0 leads q4_K_M by 23 percent on
-  prefill (70.6 against 57.4) and 10 percent on generation (17.0 against 15.4). Q4_K_M remains the
+  vector kernel on a CPU without AVX2. With kernels for both, q4_0 leads q4_K_M by 21 percent on
+  prefill (70.9 against 58.4) and 10 percent on generation (17.4 against 15.9). Q4_K_M remains the
   better quality per byte, and on this machine it is no longer a throughput penalty.
 - **f16 is now the slow choice**, at 13.5 tokens/s prefill and 5.4 generation: four times the bytes
   per weight of a 4-bit format, and no integer dot-product path to exploit.
@@ -210,7 +226,7 @@ All four are the same Qwen2.5-0.5B model, so this isolates the quantization form
   [`build-macpro31-scale.md`](build-macpro31-scale.md). On a machine that is somebody's desktop,
   `-t 6` is the better default: 88 percent of this prefill and no loss of generation.
 
-## Reproducing the numbers## Reproducing the numbers
+## Reproducing the numbers
 
 ```
 scripts/build-macpro31.sh
