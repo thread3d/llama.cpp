@@ -49,6 +49,14 @@ LABELS = {
     "Falcon3-3B-Instruct-Q4_K_M.gguf": "Falcon3-3B",
     "smollm2-1.7b-instruct-q4_k_m.gguf": "SmolLM2-1.7B",
     "DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf": "R1-Distill-Qwen-1.5B",
+    "internlm2_5-7b-chat-Q4_K_M.gguf": "internlm2.5-7b-chat",
+    "Yi-1.5-6B-Chat-Q4_K_M.gguf": "Yi-1.5-6B-Chat",
+    "Mistral-Nemo-Instruct-2407-Q4_K_M.gguf": "Mistral-Nemo-12B",
+    "qwen2.5-coder-7b-instruct-q4_k_m.gguf": "Qwen2.5-Coder-7B",
+    "DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf": "DeepSeek-Coder-V2-Lite",
+    "Qwen2.5-Math-7B-Instruct-Q4_K_M.gguf": "Qwen2.5-Math-7B",
+    "gemma-2-9b-it-Q4_K_M.gguf": "gemma-2-9b-it",
+    "Phi-3-medium-4k-instruct-Q4_K_M.gguf": "Phi-3-medium-14B",
 }
 
 
