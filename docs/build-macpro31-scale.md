@@ -247,7 +247,55 @@ Representative absolute figures, tokens/s:
 - **Six threads is the sweet spot on a machine that is somebody's desktop.** 98 percent of the
   7-thread generation rate for 88 percent of the prefill, with two cores left for the desktop. The
   8-thread collapse documented in `build-macpro31-perf.md` is why "one more than 6" is not an option.
-- The 1-thread count will be added when its run finishes.
+- The 1-thread count was never completed, and that pre-merge series is now stopped; only 7
+  and 6 threads have been measured on build 12743 (below).
+
+### The 34-file set on build 12743
+
+The 7- and 6-thread counts were re-measured after the upstream merge, on build 12743 with the full
+34-file set (`bench-wide-7t.jsonl` and `bench-wide-6t.jsonl`). These are the only thread numbers
+measured on the current binary; the five-count series above describes the earlier 22-model set on
+build 12330 and is kept for the shape of the curve.
+
+![Throughput at 7 and 6 threads over 34 files, build 12743](macpro31/threads-throughput-12743.svg)
+
+Across all 34 files, as a percentage of the 7-thread rate:
+
+| threads | prefill median | prefill range | generation median | generation range | thread ratio |
+|---|---|---|---|---|---|
+| 6 | 87.3% | 84.8-92.0% | 97.1% | 92.0-104.6% | 85.7% |
+
+Representative absolute figures, tokens/s:
+
+| model | test | 7t | 6t | 6t/7t |
+|---|---|---|---|---|
+| Qwen2.5-0.5B q4_K_M | prefill | 58.50 | 49.61 | 85% |
+| Qwen2.5-0.5B q4_K_M | generation | 15.60 | 15.46 | 99% |
+| Qwen2.5-3B | prefill | 11.08 | 9.67 | 87% |
+| Qwen2.5-3B | generation | 3.18 | 3.07 | 97% |
+| Qwen3-8B | prefill | 4.52 | 3.94 | 87% |
+| Qwen3-8B | generation | 1.35 | 1.31 | 97% |
+| Mistral-7B Q8_0 | prefill | 2.95 | 2.57 | 87% |
+| Mistral-7B Q8_0 | generation | 0.93 | 0.93 | 100% |
+| DeepSeek-Coder-V2-Lite (MoE) | prefill | 9.72 | 8.71 | 90% |
+| DeepSeek-Coder-V2-Lite (MoE) | generation | 3.35 | 3.27 | 98% |
+| gemma-2-27B Q6_K | prefill | 0.78 | 0.71 | 92% |
+| gemma-2-27B Q6_K | generation | 0.27 | 0.26 | 96% |
+| Qwen2.5-32B Q6_K | prefill | 0.68 | 0.59 | 87% |
+| Qwen2.5-32B Q6_K | generation | 0.23 | 0.22 | 94% |
+
+- **The shape holds on the wider set.** Prefill lands at 87.3 percent, 1.6 points above the thread
+  ratio and within 0.7 points of the 22-model figure (88.0), spread 84.8 to 92.0 across 34 files.
+- **Generation keeps 97.1 percent, so the sweet spot survives the wider set** — 2.9 percent down,
+  against 1.9 percent on the 22-model series. Read the claim as "a couple of percent", not zero.
+- **Four files measured above 7 threads**: Mistral-7B q4_0 at 105 percent, qwen2.5-1.5b q4_0 and the
+  stories260K toy at 103, Qwen2.5-14B Q8_0 at 101. Small or bandwidth-light files, where a few
+  percent is run-to-run noise rather than a gain from dropping a core.
+- **The high-precision additions sit in the same band.** The Q8_0 and Q6_K files take 87 to 92
+  percent of their prefill, so twice the bytes per parameter does not change how the machine divides
+  work across cores; it only halves the absolute rate.
+- The run took 3 h 36 min for 102 conditions (34 files x 3 repeats) at 6 threads, with the
+  quiet-machine gate blocking once.
 
 ## What the numbers say
 
