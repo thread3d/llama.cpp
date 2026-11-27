@@ -89,8 +89,11 @@ Binaries land in `build-macpro31-cpu/bin`.
 
 ## Verification on this machine
 
-The branch tip (`57654b8`, llama.cpp build 12743, upstream `abca6920`) was verified with the full
-CTest suite and the build script's own checks:
+The branch tip (`3a66096`, llama.cpp build 12833, upstream `ca123ba`, 2026-11-27) was verified with
+the full CTest suite and the build script's own checks. The 87-commit upstream merge applied without
+textual conflicts, and the result matches the build 12743 suite exactly — nothing new fails. This
+merge rebuilt and re-tested the tree; it did not re-measure throughput, so the numbers below still
+describe build 12743.
 
 - `ctest`: **71 of 74 tests pass**, one is skipped and two cannot run on this OS.
 - `scripts/build-macpro31.sh check` (`test-quantize-fns`, `test-gguf`, `test-sampling`,
@@ -108,7 +111,10 @@ CTest suite and the build script's own checks:
 - **Python version matters.** Several tests run Python scripts, and `scripts/chat_tts_norm.py` uses
   `tuple[int, ...]`. Python 3.8 stops with `TypeError: 'type' object is not subscriptable`, so the
   suite was run with Homebrew Python 3.9.1 and jinja2 3.1.4; with Python 3.8, `test-jinja-py` fails
-  52 assertions purely on that import.
+  52 assertions purely on that import. `test-jinja -py` shells out to `python3` from `PATH`, while
+  `scripts/build-macpro31.sh` puts MacPorts first, so run ctest with `/usr/local/bin` ahead of
+  `/opt/local/bin` (e.g. `PATH=/usr/local/bin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`):
+  otherwise `test-jinja-py` fails on Python 3.8 even though nothing about the tree changed.
 - The four models added to the sweep (Qwen2.5-32B Q6_K, gemma-2-27B Q6_K, Qwen2.5-14B Q8_0,
   Mistral-7B Q8_0) each load and run; the 25 GiB 32B file fits in this machine's 32 GiB.
 
